@@ -132,9 +132,12 @@ fn main() {
                 log::error!("Failed to write phpmyadmin.conf (disabled): {e}");
             }
             // Persist the force-disabled state so it survives restart
+            // NOTE: must be kept in sync with do_persist in executor.rs
             let state_path = install_dir.join("ramp.state");
-            let mut p = persisted.clone();
-            p.phpmyadmin_enabled = false;
+            let p = PersistedState {
+                phpmyadmin_enabled: false,
+                ..persisted.clone()
+            };
             match serde_json::to_vec_pretty(&p) {
                 Ok(data) => {
                     if let Err(e) = config::atomic_write(&state_path, &data) {
@@ -145,22 +148,6 @@ fn main() {
             }
         } else if persisted.phpmyadmin_enabled && phpmyadmin_dir_exists {
             app_state.phpmyadmin_enabled = true;
-            let blowfish = persisted
-                .phpmyadmin_blowfish_secret
-                .clone()
-                .unwrap_or_else(|| phpmyadmin_conf::generate_blowfish_secret(&config.install_dir));
-            let config_path = phpmyadmin_dir.join("config.inc.php");
-            if phpmyadmin_conf::is_ramp_owned_config(&config_path) || !config_path.exists() {
-                let content = phpmyadmin_conf::generate_config_inc_php(
-                    config.mysql.port,
-                    &config.phpmyadmin.mysql_user,
-                    &config.phpmyadmin.mysql_password,
-                    &blowfish,
-                );
-                if let Err(e) = config::atomic_write(&config_path, content.as_bytes()) {
-                    log::error!("Failed to write phpmyadmin config.inc.php: {e}");
-                }
-            }
             if let Err(e) =
                 phpmyadmin_conf::write_phpmyadmin_apache_conf_enabled(&config, config.php.port)
             {
