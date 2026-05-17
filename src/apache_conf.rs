@@ -77,7 +77,7 @@ DocumentRoot "{apache_dir}/htdocs"
 #   `doc_root` (set in php.ini) rather than absolute paths in the proxy URL,
 #   because absolute Windows paths in fcgi:// URLs trigger the same parser bug.
 ProxyFCGIBackendType GENERIC
-ProxyPassMatch "^/(.+\.php(/.*)?)$" "fcgi://127.0.0.1:{php_port}/$1"
+ProxyPassMatch "^/(?!phpmyadmin/)(.+\.php(/.*)?)$" "fcgi://127.0.0.1:{php_port}/$1"
 
 # Deny .htaccess and .htpasswd access
 <Files ".ht*">
@@ -196,6 +196,17 @@ mod tests {
         assert!(conf.contains("fcgi://127.0.0.1:9000"));
         assert!(conf.contains("ProxyPassMatch"));
         assert!(conf.contains("mod_proxy_fcgi.so"));
+    }
+
+    #[test]
+    fn global_proxy_pass_match_excludes_phpmyadmin() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let conf = generate_httpd_conf(&cfg);
+        assert!(
+            conf.contains("(?!phpmyadmin/)"),
+            "global ProxyPassMatch must exclude /phpmyadmin/ so phpmyadmin.conf handles those requests"
+        );
     }
 
     #[test]

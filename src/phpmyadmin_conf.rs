@@ -15,18 +15,18 @@ Alias /phpmyadmin "{pma_dir_s}"
 
 # Route .php files under /phpmyadmin through PHP-CGI FastCGI.
 #
-# Why ProxyFCGISetEnvIf + ProxyPass inside LocationMatch:
-# phpMyAdmin lives at <install>/phpmyadmin/, outside apache/htdocs/ (doc_root).
-# PHP-CGI resolves SCRIPT_FILENAME as the FastCGI param — ProxyFCGISetEnvIf sets
-# it to the absolute path before the request reaches PHP, bypassing doc_root.
-# The named capture MATCH_PHPSCRIPT strips "/phpmyadmin/" so the path is relative
-# to pma_dir. ProxyPass inside <LocationMatch> takes precedence over the global
-# ProxyPassMatch in httpd.conf, so phpMyAdmin requests are not intercepted first.
-<LocationMatch "^/phpmyadmin/(?<phpscript>.+\.php(/.*)?)$">
-    ProxyFCGISetEnvIf "true" SCRIPT_FILENAME "{pma_dir_s}/%{{env:MATCH_PHPSCRIPT}}"
-    ProxyFCGIBackendType GENERIC
-    ProxyPass "fcgi://127.0.0.1:{php_port}/"
-</LocationMatch>
+# Why SetEnvIf + ProxyFCGISetEnvIf at server scope (not <LocationMatch>):
+# The global ProxyPassMatch in httpd.conf runs during URI translation, before
+# <Location> sections fire — <LocationMatch>-scoped ProxyPass cannot override it.
+# The global rule excludes /phpmyadmin/ via a negative lookahead, so this
+# ProxyPassMatch handles phpMyAdmin PHP files exclusively.
+#
+# SetEnvIf captures the script path relative to /phpmyadmin/ into PMA_SCRIPT.
+# ProxyFCGISetEnvIf then overrides SCRIPT_FILENAME with the absolute path so
+# PHP-CGI finds the file in <install>/phpmyadmin/ instead of doc_root.
+SetEnvIf Request_URI "^/phpmyadmin/(.+\.php)" PMA_SCRIPT=$1
+ProxyFCGISetEnvIf "reqenv('PMA_SCRIPT') != ''" SCRIPT_FILENAME "{pma_dir_s}/%{{reqenv:PMA_SCRIPT}}"
+ProxyPassMatch "^/phpmyadmin/(.+\.php(/.*)?)$" "fcgi://127.0.0.1:{php_port}/$1"
 "#
     )
 }
@@ -170,20 +170,24 @@ mod tests {
     }
 
     #[test]
-    fn apache_conf_sets_script_filename_via_proxy_fcgi_set_env_if() {
+    fn apache_conf_sets_script_filename_via_set_env_if() {
         let tmp = TempDir::new().unwrap();
         let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
         assert!(
+            conf.contains("SetEnvIf"),
+            "must use SetEnvIf to capture script path into PMA_SCRIPT env var"
+        );
+        assert!(
+            conf.contains("PMA_SCRIPT"),
+            "must capture script path into PMA_SCRIPT for use by ProxyFCGISetEnvIf"
+        );
+        assert!(
             conf.contains("ProxyFCGISetEnvIf"),
-            "must use ProxyFCGISetEnvIf to set SCRIPT_FILENAME (doc_root-relative paths point at wrong dir)"
+            "must use ProxyFCGISetEnvIf to override SCRIPT_FILENAME with absolute path"
         );
         assert!(
             conf.contains("SCRIPT_FILENAME"),
             "must override SCRIPT_FILENAME so PHP-CGI finds files outside doc_root"
-        );
-        assert!(
-            conf.contains("MATCH_PHPSCRIPT"),
-            "must use named capture to strip /phpmyadmin/ prefix"
         );
     }
 
