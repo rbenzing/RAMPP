@@ -9,6 +9,7 @@ mod logger;
 mod mysql_conf;
 mod paths;
 mod php_conf;
+mod phpmyadmin_conf;
 mod process;
 mod reducer;
 mod state;

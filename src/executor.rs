@@ -4,6 +4,7 @@ use crate::events::{Event, SideEffect};
 use crate::health::{poll_until_ready, run_health_checker};
 use crate::logger::SharedLog;
 use crate::mysql_conf::rewrite_my_ini_with_port;
+use crate::phpmyadmin_conf;
 use crate::process::{find_available_port, spawn_service, ServiceProcess};
 use crate::state::{AppState, PersistedState, RampConfig, Service, PORT_SCAN_RANGE};
 use crossbeam_channel::Sender;
@@ -69,9 +70,7 @@ impl Executor {
                     self.log.push(msg);
                 }
                 SideEffect::PersistDesiredState => self.do_persist(state),
-                SideEffect::TogglePhpMyAdmin(_) => {
-                    // handled in future task
-                }
+                SideEffect::TogglePhpMyAdmin(enable) => self.do_toggle_phpmyadmin(enable, state),
             }
         }
     }
@@ -220,17 +219,23 @@ impl Executor {
     }
 
     fn do_persist(&self, state: &AppState) {
+        let state_path = self.config.install_dir.join("ramp.state");
+        // Preserve blowfish_secret from the existing state file so it survives PersistDesiredState calls
+        let existing_secret = std::fs::read(&state_path)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<PersistedState>(&data).ok())
+            .and_then(|p| p.phpmyadmin_blowfish_secret);
+
         let persisted = PersistedState {
             apache_desired: state.apache.desired,
             mysql_desired: state.mysql.desired,
             php_desired: state.php.desired,
             phpmyadmin_enabled: state.phpmyadmin_enabled,
-            phpmyadmin_blowfish_secret: None,
+            phpmyadmin_blowfish_secret: existing_secret,
         };
-        let path = self.config.install_dir.join("ramp.state");
         let result = serde_json::to_vec_pretty(&persisted)
             .map_err(|e| format!("serialize state failed: {e}"))
-            .and_then(|data| atomic_write(&path, &data));
+            .and_then(|data| atomic_write(&state_path, &data));
 
         if let Err(e) = result {
             // State persistence failure means desired state will be lost on restart.
@@ -240,6 +245,100 @@ impl Executor {
                 format!("ERROR: state persist failed — restart may not restore services: {e}");
             self.log.push(msg);
         }
+    }
+
+    fn do_toggle_phpmyadmin(&mut self, enable: bool, state: &AppState) {
+        let _ = state; // state not needed here but kept for signature symmetry
+        let pma_dir = self.config.install_dir.join("phpmyadmin");
+
+        if enable && !pma_dir.exists() {
+            log::error!("phpMyAdmin: directory not found at {}", pma_dir.display());
+            self.log.push(format!(
+                "ERROR: phpMyAdmin directory not found at {}",
+                pma_dir.display()
+            ));
+            let _ = self.tx.send(Event::PhpMyAdminToggled(false));
+            return;
+        }
+
+        let php_port = self.effective_port(Service::Php);
+
+        if enable {
+            let config_path = pma_dir.join("config.inc.php");
+            let should_write =
+                !config_path.exists() || phpmyadmin_conf::is_ramp_owned_config(&config_path);
+
+            if should_write {
+                let blowfish_secret = self.load_or_generate_blowfish_secret();
+                let mysql_port = self.effective_port(Service::Mysql);
+                let content = phpmyadmin_conf::generate_config_inc_php(
+                    mysql_port,
+                    &self.config.phpmyadmin.mysql_user,
+                    &self.config.phpmyadmin.mysql_password,
+                    &blowfish_secret,
+                );
+                if let Err(e) = atomic_write(&config_path, content.as_bytes()) {
+                    log::error!("phpMyAdmin: cannot write config.inc.php: {e}");
+                    self.log.push(format!(
+                        "ERROR: phpMyAdmin config.inc.php write failed: {e}"
+                    ));
+                    let _ = self.tx.send(Event::PhpMyAdminToggled(false));
+                    return;
+                }
+            }
+        }
+
+        let result = if enable {
+            phpmyadmin_conf::write_phpmyadmin_apache_conf_enabled(&self.config, php_port)
+        } else {
+            phpmyadmin_conf::write_phpmyadmin_apache_conf_disabled(&self.config)
+        };
+
+        if let Err(e) = result {
+            log::error!("phpMyAdmin: cannot write phpmyadmin.conf: {e}");
+            self.log
+                .push(format!("ERROR: phpMyAdmin conf write failed: {e}"));
+            let _ = self.tx.send(Event::PhpMyAdminToggled(!enable));
+            return;
+        }
+
+        let _ = self.tx.send(Event::PhpMyAdminToggled(enable));
+        let _ = self.tx.send(Event::RestartService(Service::Apache));
+
+        if enable {
+            let apache_port = self.effective_port(Service::Apache);
+            let url = format!("http://127.0.0.1:{apache_port}/phpmyadmin/");
+            log::info!("phpMyAdmin: opening {url}");
+            self.log.push(format!("phpMyAdmin: opening {url}"));
+            if let Err(e) = std::process::Command::new("cmd")
+                .args(["/c", "start", "", &url])
+                .spawn()
+            {
+                log::warn!("phpMyAdmin: could not open browser: {e}");
+            }
+        }
+    }
+
+    fn load_or_generate_blowfish_secret(&self) -> String {
+        let state_path = self.config.install_dir.join("ramp.state");
+        if let Ok(data) = std::fs::read(&state_path) {
+            if let Ok(persisted) = serde_json::from_slice::<PersistedState>(&data) {
+                if let Some(secret) = persisted.phpmyadmin_blowfish_secret {
+                    return secret;
+                }
+            }
+        }
+        // Generate a fresh secret and persist it immediately
+        let secret = phpmyadmin_conf::generate_blowfish_secret(&self.config.install_dir);
+        if let Ok(data) = std::fs::read(&state_path) {
+            if let Ok(mut persisted) = serde_json::from_slice::<PersistedState>(&data) {
+                persisted.phpmyadmin_blowfish_secret = Some(secret.clone());
+                if let Ok(json) = serde_json::to_vec_pretty(&persisted) {
+                    let _ = atomic_write(&state_path, &json);
+                }
+            }
+        }
+        secret
     }
 
     /// Graceful shutdown: signal all watcher threads to kill their processes, stop all

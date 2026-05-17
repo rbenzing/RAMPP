@@ -98,6 +98,7 @@ pub fn write_phpmyadmin_apache_conf_disabled(cfg: &RampConfig) -> Result<(), Str
         .map_err(|e| format!("cannot write phpmyadmin.conf: {e}"))
 }
 
+#[allow(dead_code)]
 pub fn ensure_phpmyadmin_apache_conf(
     cfg: &RampConfig,
     enabled: bool,
