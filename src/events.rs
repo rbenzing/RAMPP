@@ -52,6 +52,7 @@ pub enum Event {
     // phpMyAdmin
     TogglePhpMyAdmin,
     PhpMyAdminToggled(bool),
+    OpenPhpMyAdmin,
 }
 
 /// Side effects produced by the reducer. Executed by the executor AFTER state mutation.

@@ -356,6 +356,10 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             }
         }
 
+        Event::OpenPhpMyAdmin => {
+            effects.push(SideEffect::OpenPhpMyAdminBrowser);
+        }
+
         Event::PhpMyAdminToggled(enabled) => {
             state.phpmyadmin_enabled = enabled;
             effects.push(SideEffect::PersistDesiredState);

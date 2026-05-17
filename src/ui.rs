@@ -65,6 +65,7 @@ impl eframe::App for RampApp {
                 state.config.apache.port,
                 false,
                 false,
+                false,
                 mysql_running,
                 php_running,
                 apache_running,
@@ -77,6 +78,7 @@ impl eframe::App for RampApp {
                 state.config.mysql.port,
                 state.phpmyadmin_enabled,
                 state.phpmyadmin_dir_exists,
+                true,
                 mysql_running,
                 php_running,
                 apache_running,
@@ -89,6 +91,7 @@ impl eframe::App for RampApp {
                 state.config.php.port,
                 false,
                 false,
+                false,
                 mysql_running,
                 php_running,
                 apache_running,
@@ -97,15 +100,28 @@ impl eframe::App for RampApp {
             ui.separator();
 
             ui.horizontal(|ui| {
-                if ui.button("Start All").clicked() {
-                    let _ = self.tx.send(Event::StartService(Service::Apache));
-                    let _ = self.tx.send(Event::StartService(Service::Mysql));
-                    let _ = self.tx.send(Event::StartService(Service::Php));
-                }
-                if ui.button("Stop All").clicked() {
-                    let _ = self.tx.send(Event::StopService(Service::Apache));
-                    let _ = self.tx.send(Event::StopService(Service::Mysql));
-                    let _ = self.tx.send(Event::StopService(Service::Php));
+                // Single toggle button: Start All when any service is stoppable, Stop All otherwise
+                let any_active = [&state.apache, &state.mysql, &state.php].iter().any(|s| {
+                    matches!(
+                        s.state,
+                        ServiceState::Running | ServiceState::Starting | ServiceState::Stopping
+                    )
+                });
+                let all_stop_label = if any_active {
+                    "■ Stop All"
+                } else {
+                    "▶ Start All"
+                };
+                if ui.button(all_stop_label).clicked() {
+                    if any_active {
+                        let _ = self.tx.send(Event::StopService(Service::Apache));
+                        let _ = self.tx.send(Event::StopService(Service::Mysql));
+                        let _ = self.tx.send(Event::StopService(Service::Php));
+                    } else {
+                        let _ = self.tx.send(Event::StartService(Service::Apache));
+                        let _ = self.tx.send(Event::StartService(Service::Mysql));
+                        let _ = self.tx.send(Event::StartService(Service::Php));
+                    }
                 }
                 if ui.button("Reload Config").clicked() {
                     match load_config(&state.config.install_dir) {
@@ -149,6 +165,7 @@ fn service_row(
     configured_port: u16,
     phpmyadmin_enabled: bool,
     phpmyadmin_dir_exists: bool,
+    show_admin: bool,
     mysql_running: bool,
     php_running: bool,
     apache_running: bool,
@@ -197,7 +214,7 @@ fn service_row(
                 ui.colored_label(egui::Color32::RED, format!("⚠ {short}"))
                     .on_hover_text(err.as_str());
             }
-            ui.colored_label(egui::Color32::GRAY, "(Start to retry)");
+            ui.colored_label(egui::Color32::GRAY, "(click ▶ to retry)");
         } else if let Some(err) = &status.last_error {
             let short = truncate_error(err);
             ui.colored_label(egui::Color32::RED, format!("⚠ {short}"))
@@ -205,42 +222,66 @@ fn service_row(
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Stop").clicked() {
-                let _ = tx.send(Event::StopService(svc));
+            // Start/Stop toggle — single button, label reflects current state
+            let is_running = matches!(
+                status.state,
+                ServiceState::Running | ServiceState::Starting | ServiceState::Stopping
+            );
+            let toggle_label = if is_running { "■ Stop" } else { "▶ Start" };
+            if ui.button(toggle_label).clicked() {
+                if is_running {
+                    let _ = tx.send(Event::StopService(svc));
+                } else {
+                    let _ = tx.send(Event::StartService(svc));
+                }
             }
-            if ui.button("Restart").clicked() {
+
+            // Restart — only useful when running
+            let restart_btn = ui.add_enabled(
+                status.state == ServiceState::Running,
+                egui::Button::new("↺ Restart"),
+            );
+            if restart_btn.clicked() {
                 let _ = tx.send(Event::RestartService(svc));
             }
-            if ui.button("Start").clicked() {
-                let _ = tx.send(Event::StartService(svc));
-            }
 
-            // Admin button — only for MySQL row
-            if svc == Service::Mysql {
+            // Admin controls — only on the MySQL row when show_admin is true
+            if show_admin {
                 let all_up = mysql_running && php_running && apache_running;
                 let can_admin = all_up && phpmyadmin_dir_exists;
+                let disabled_tooltip = if !phpmyadmin_dir_exists {
+                    "phpMyAdmin not found in install directory"
+                } else {
+                    "MySQL, PHP, and Apache must all be running"
+                };
 
-                let btn_label = if phpmyadmin_enabled {
+                // Open button — only active when admin is enabled and services are up
+                let open_active = can_admin && phpmyadmin_enabled;
+                let open_btn = ui.add_enabled(open_active, egui::Button::new("↗ Open"));
+                let open_clicked = open_btn.clicked();
+                if !open_active {
+                    open_btn.on_disabled_hover_text(if phpmyadmin_enabled {
+                        disabled_tooltip
+                    } else {
+                        "Enable Admin first"
+                    });
+                }
+                if open_clicked {
+                    let _ = tx.send(Event::OpenPhpMyAdmin);
+                }
+
+                // Admin toggle button
+                let admin_label = if phpmyadmin_enabled {
                     "Admin ■"
                 } else {
                     "Admin ▶"
                 };
-
-                let btn = egui::Button::new(btn_label);
-                let response = ui.add_enabled(can_admin, btn);
-
-                let clicked = response.clicked();
-
+                let admin_btn = ui.add_enabled(can_admin, egui::Button::new(admin_label));
+                let admin_clicked = admin_btn.clicked();
                 if !can_admin {
-                    let tooltip = if !phpmyadmin_dir_exists {
-                        "phpMyAdmin not found in install directory"
-                    } else {
-                        "MySQL, PHP, and Apache must all be running"
-                    };
-                    response.on_disabled_hover_text(tooltip);
+                    admin_btn.on_disabled_hover_text(disabled_tooltip);
                 }
-
-                if clicked {
+                if admin_clicked {
                     let _ = tx.send(Event::TogglePhpMyAdmin);
                 }
             }
