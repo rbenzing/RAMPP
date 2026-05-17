@@ -189,8 +189,12 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     )));
                 }
             }
-            // Auto-disable phpMyAdmin if a required dependency crashes/stops
-            if state.phpmyadmin_enabled && matches!(svc, Service::Mysql | Service::Php) {
+            // Auto-disable phpMyAdmin only on unexpected exit (crash), not intentional stop.
+            // desired == Stopped means the user stopped the service deliberately; phpMyAdmin
+            // state is preserved so it resumes when the service comes back up.
+            let is_crash = state.service(svc).desired == DesiredServiceState::Running;
+            if state.phpmyadmin_enabled && is_crash && matches!(svc, Service::Mysql | Service::Php)
+            {
                 effects.push(SideEffect::TogglePhpMyAdmin(false));
             }
         }
@@ -991,9 +995,10 @@ mod tests {
 
     fn make_state_all_running() -> AppState {
         let mut state = make_state();
-        state.apache.state = ServiceState::Running;
-        state.mysql.state = ServiceState::Running;
-        state.php.state = ServiceState::Running;
+        for svc in [Service::Apache, Service::Mysql, Service::Php] {
+            state.service_mut(svc).state = ServiceState::Running;
+            state.service_mut(svc).desired = DesiredServiceState::Running;
+        }
         state.phpmyadmin_dir_exists = true;
         state
     }
@@ -1083,7 +1088,8 @@ mod tests {
     }
 
     #[test]
-    fn mysql_process_exit_while_phpmyadmin_enabled_emits_toggle_off() {
+    fn mysql_crash_while_phpmyadmin_enabled_emits_toggle_off() {
+        // desired=Running → unexpected exit → auto-disable
         let mut state = make_state_all_running();
         state.phpmyadmin_enabled = true;
         let (_, effects) = reducer(
@@ -1099,7 +1105,8 @@ mod tests {
     }
 
     #[test]
-    fn php_process_exit_while_phpmyadmin_enabled_emits_toggle_off() {
+    fn php_crash_while_phpmyadmin_enabled_emits_toggle_off() {
+        // desired=Running → unexpected exit → auto-disable
         let mut state = make_state_all_running();
         state.phpmyadmin_enabled = true;
         let (_, effects) = reducer(
@@ -1112,6 +1119,44 @@ mod tests {
         assert!(effects
             .iter()
             .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(false))));
+    }
+
+    #[test]
+    fn mysql_intentional_stop_while_phpmyadmin_enabled_does_not_toggle_off() {
+        // desired=Stopped → user stopped the service → preserve phpmyadmin state
+        let mut state = make_state_all_running();
+        state.phpmyadmin_enabled = true;
+        state.mysql.desired = DesiredServiceState::Stopped;
+        state.mysql.state = ServiceState::Stopping;
+        let (_, effects) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Mysql,
+                exit_code: Some(0),
+            },
+        );
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(_))));
+    }
+
+    #[test]
+    fn php_intentional_stop_while_phpmyadmin_enabled_does_not_toggle_off() {
+        // desired=Stopped → user stopped the service → preserve phpmyadmin state
+        let mut state = make_state_all_running();
+        state.phpmyadmin_enabled = true;
+        state.php.desired = DesiredServiceState::Stopped;
+        state.php.state = ServiceState::Stopping;
+        let (_, effects) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Php,
+                exit_code: Some(0),
+            },
+        );
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(_))));
     }
 
     #[test]
