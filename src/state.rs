@@ -117,11 +117,18 @@ pub struct PhpConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhpMyAdminConfig {
+    pub mysql_user: String,
+    pub mysql_password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RampConfig {
     pub install_dir: PathBuf,
     pub apache: ApacheConfig,
     pub mysql: MysqlConfig,
     pub php: PhpConfig,
+    pub phpmyadmin: PhpMyAdminConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

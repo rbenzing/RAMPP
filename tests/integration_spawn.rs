@@ -6,7 +6,7 @@
 /// Run with: cargo test --test integration_spawn
 use crossbeam_channel::unbounded;
 use ramp::process::{check_port_available, spawn_service};
-use ramp::state::{ApacheConfig, MysqlConfig, PhpConfig, RampConfig};
+use ramp::state::{ApacheConfig, MysqlConfig, PhpConfig, PhpMyAdminConfig, RampConfig};
 use std::path::PathBuf;
 
 /// Build a minimal RampConfig pointing apache.bin at the given binary.
@@ -29,6 +29,10 @@ fn make_config(bin: PathBuf) -> RampConfig {
             port: 19000,
             bin: install_dir.join("php-cgi.exe"),
             ini: install_dir.join("php.ini"),
+        },
+        phpmyadmin: PhpMyAdminConfig {
+            mysql_user: "root".to_string(),
+            mysql_password: String::new(),
         },
     }
 }

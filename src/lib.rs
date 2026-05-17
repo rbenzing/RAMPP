@@ -17,5 +17,6 @@ mod apache_conf;
 mod executor;
 mod mysql_conf;
 mod php_conf;
+pub mod phpmyadmin_conf;
 mod tray;
 mod ui;

@@ -118,6 +118,10 @@ fn validate_and_build(doc: TomlRoot, install_dir: &Path) -> Result<RampConfig, S
             bin: paths.php_bin,
             ini: paths.php_ini,
         },
+        phpmyadmin: crate::state::PhpMyAdminConfig {
+            mysql_user: "root".to_string(),
+            mysql_password: String::new(),
+        },
     })
 }
 

@@ -8,8 +8,8 @@ use proptest::prelude::*;
 use ramp::events::{Event, SideEffect};
 use ramp::reducer::reducer;
 use ramp::state::{
-    ApacheConfig, AppState, DesiredServiceState, MysqlConfig, PhpConfig, RampConfig, Service,
-    ServiceState, MAX_RETRIES,
+    ApacheConfig, AppState, DesiredServiceState, MysqlConfig, PhpConfig, PhpMyAdminConfig,
+    RampConfig, Service, ServiceState, MAX_RETRIES,
 };
 use std::path::PathBuf;
 
@@ -33,6 +33,10 @@ fn make_base_state() -> AppState {
             port: 9000,
             bin: PathBuf::from("C:\\ramp\\php\\php-cgi.exe"),
             ini: PathBuf::from("C:\\ramp\\php\\php.ini"),
+        },
+        phpmyadmin: PhpMyAdminConfig {
+            mysql_user: "root".to_string(),
+            mysql_password: String::new(),
         },
     })
 }

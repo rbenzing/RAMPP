@@ -364,6 +364,10 @@ mod tests {
                 bin: std::path::PathBuf::from("C:\\ramp\\php\\php-cgi.exe"),
                 ini: std::path::PathBuf::from("C:\\ramp\\php\\php.ini"),
             },
+            phpmyadmin: crate::state::PhpMyAdminConfig {
+                mysql_user: "root".to_string(),
+                mysql_password: String::new(),
+            },
         };
         AppState::new(config)
     }
