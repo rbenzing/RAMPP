@@ -166,6 +166,9 @@ pub struct AppState {
     pub ports: PortState,
     pub phpmyadmin_enabled: bool,
     pub phpmyadmin_dir_exists: bool,
+    /// Set when phpMyAdmin is toggled on; cleared and acted on when Apache next becomes Ready.
+    /// Ensures the browser opens with the correct port after Apache restarts.
+    pub open_phpmyadmin_on_apache_ready: bool,
 }
 
 impl AppState {
@@ -178,6 +181,7 @@ impl AppState {
             ports: PortState::new(),
             phpmyadmin_enabled: false,
             phpmyadmin_dir_exists: false,
+            open_phpmyadmin_on_apache_ready: false,
         }
     }
 

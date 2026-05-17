@@ -67,4 +67,5 @@ pub enum SideEffect {
     LogEvent(String),
     PersistDesiredState,
     TogglePhpMyAdmin(bool),
+    OpenPhpMyAdminBrowser,
 }

@@ -113,6 +113,13 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                 state.service_mut(svc).health_fail_streak = 0;
                 state.clear_started_at(svc);
                 effects.push(SideEffect::LogEvent(format!("{svc}: ready")));
+                // Open the browser once Apache is ready after a phpMyAdmin toggle-on.
+                // Doing it here (not at toggle time) ensures we use the correct port
+                // even if Apache restarted on a different port due to a port conflict.
+                if svc == Service::Apache && state.open_phpmyadmin_on_apache_ready {
+                    state.open_phpmyadmin_on_apache_ready = false;
+                    effects.push(SideEffect::OpenPhpMyAdminBrowser);
+                }
             } else {
                 effects.push(SideEffect::LogEvent(format!(
                     "{svc}: ProcessReady ignored in state {}",
@@ -341,6 +348,10 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                 ));
             } else {
                 let target = !state.phpmyadmin_enabled;
+                if target {
+                    // Browser opens after Apache restarts and is ready, so we get the correct port.
+                    state.open_phpmyadmin_on_apache_ready = true;
+                }
                 effects.push(SideEffect::TogglePhpMyAdmin(target));
             }
         }
@@ -1012,6 +1023,31 @@ mod tests {
             .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(true))));
         // State not yet updated — waits for PhpMyAdminToggled
         assert!(!new_state.phpmyadmin_enabled);
+        // Flag set so browser opens after Apache restart completes
+        assert!(new_state.open_phpmyadmin_on_apache_ready);
+    }
+
+    #[test]
+    fn apache_ready_after_phpmyadmin_toggle_opens_browser_and_clears_flag() {
+        let mut state = make_state_all_running();
+        state.open_phpmyadmin_on_apache_ready = true;
+        state.apache.state = ServiceState::Starting;
+        let (new_state, effects) = reducer(state, Event::ProcessReady(Service::Apache));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::OpenPhpMyAdminBrowser)));
+        assert!(!new_state.open_phpmyadmin_on_apache_ready);
+    }
+
+    #[test]
+    fn apache_ready_without_flag_does_not_open_browser() {
+        let mut state = make_state_all_running();
+        state.open_phpmyadmin_on_apache_ready = false;
+        state.apache.state = ServiceState::Starting;
+        let (_, effects) = reducer(state, Event::ProcessReady(Service::Apache));
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::OpenPhpMyAdminBrowser)));
     }
 
     #[test]

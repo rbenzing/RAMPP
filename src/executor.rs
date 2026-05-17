@@ -71,6 +71,7 @@ impl Executor {
                 }
                 SideEffect::PersistDesiredState => self.do_persist(state),
                 SideEffect::TogglePhpMyAdmin(enable) => self.do_toggle_phpmyadmin(enable, state),
+                SideEffect::OpenPhpMyAdminBrowser => self.do_open_phpmyadmin_browser(),
             }
         }
     }
@@ -304,18 +305,20 @@ impl Executor {
 
         let _ = self.tx.send(Event::PhpMyAdminToggled(enable));
         let _ = self.tx.send(Event::RestartService(Service::Apache));
+        // Browser is opened by do_open_phpmyadmin_browser, called when Apache becomes Ready
+        // after the restart, so we always use the correct (possibly port-rotated) port.
+    }
 
-        if enable {
-            let apache_port = self.effective_port(Service::Apache);
-            let url = format!("http://127.0.0.1:{apache_port}/phpmyadmin/");
-            log::info!("phpMyAdmin: opening {url}");
-            self.log.push(format!("phpMyAdmin: opening {url}"));
-            if let Err(e) = std::process::Command::new("cmd")
-                .args(["/c", "start", "", &url])
-                .spawn()
-            {
-                log::warn!("phpMyAdmin: could not open browser: {e}");
-            }
+    fn do_open_phpmyadmin_browser(&mut self) {
+        let apache_port = self.effective_port(Service::Apache);
+        let url = format!("http://127.0.0.1:{apache_port}/phpmyadmin/");
+        log::info!("phpMyAdmin: opening {url}");
+        self.log.push(format!("phpMyAdmin: opening {url}"));
+        if let Err(e) = std::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .spawn()
+        {
+            log::warn!("phpMyAdmin: could not open browser: {e}");
         }
     }
 
