@@ -15,17 +15,17 @@ Alias /phpmyadmin "{pma_dir_s}"
 
 # Route .php files under /phpmyadmin through PHP-CGI FastCGI.
 #
-# Why FcgiParams SCRIPT_FILENAME instead of doc_root-relative paths:
-# phpMyAdmin lives at <install>/phpmyadmin/, not under apache/htdocs/ (doc_root).
-# PHP-CGI resolves script paths as doc_root + fcgi-url-path, so a relative path
-# would point at the wrong directory. FcgiParams injects SCRIPT_FILENAME directly
-# into the FastCGI param set — bypassing both the fcgi:// URL parser (avoiding the
-# Windows drive-letter bug) and the doc_root join. The named capture %{{env:MATCH_PHPSCRIPT}}
-# strips the leading "/phpmyadmin/" prefix so we get the path relative to pma_dir.
+# Why ProxyFCGISetEnvIf + ProxyPass inside LocationMatch:
+# phpMyAdmin lives at <install>/phpmyadmin/, outside apache/htdocs/ (doc_root).
+# PHP-CGI resolves SCRIPT_FILENAME as the FastCGI param — ProxyFCGISetEnvIf sets
+# it to the absolute path before the request reaches PHP, bypassing doc_root.
+# The named capture MATCH_PHPSCRIPT strips "/phpmyadmin/" so the path is relative
+# to pma_dir. ProxyPass inside <LocationMatch> takes precedence over the global
+# ProxyPassMatch in httpd.conf, so phpMyAdmin requests are not intercepted first.
 <LocationMatch "^/phpmyadmin/(?<phpscript>.+\.php(/.*)?)$">
-    FcgiParams SCRIPT_FILENAME "{pma_dir_s}/%{{env:MATCH_PHPSCRIPT}}"
+    ProxyFCGISetEnvIf "true" SCRIPT_FILENAME "{pma_dir_s}/%{{env:MATCH_PHPSCRIPT}}"
     ProxyFCGIBackendType GENERIC
-    ProxyPassMatch "^/phpmyadmin/.+\.php" "fcgi://127.0.0.1:{php_port}/"
+    ProxyPass "fcgi://127.0.0.1:{php_port}/"
 </LocationMatch>
 "#
     )
@@ -170,12 +170,16 @@ mod tests {
     }
 
     #[test]
-    fn apache_conf_uses_fcgi_params_script_filename() {
+    fn apache_conf_sets_script_filename_via_proxy_fcgi_set_env_if() {
         let tmp = TempDir::new().unwrap();
         let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
         assert!(
-            conf.contains("FcgiParams SCRIPT_FILENAME"),
-            "must use FcgiParams to set SCRIPT_FILENAME (doc_root-relative paths point at wrong dir)"
+            conf.contains("ProxyFCGISetEnvIf"),
+            "must use ProxyFCGISetEnvIf to set SCRIPT_FILENAME (doc_root-relative paths point at wrong dir)"
+        );
+        assert!(
+            conf.contains("SCRIPT_FILENAME"),
+            "must override SCRIPT_FILENAME so PHP-CGI finds files outside doc_root"
         );
         assert!(
             conf.contains("MATCH_PHPSCRIPT"),
