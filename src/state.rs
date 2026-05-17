@@ -164,6 +164,8 @@ pub struct AppState {
     pub php: ServiceStatus,
     pub config: RampConfig,
     pub ports: PortState,
+    pub phpmyadmin_enabled: bool,
+    pub phpmyadmin_dir_exists: bool,
 }
 
 impl AppState {
@@ -174,6 +176,8 @@ impl AppState {
             php: ServiceStatus::new(),
             config,
             ports: PortState::new(),
+            phpmyadmin_enabled: false,
+            phpmyadmin_dir_exists: false,
         }
     }
 
@@ -214,6 +218,10 @@ pub struct PersistedState {
     pub mysql_desired: DesiredServiceState,
     #[serde(default = "DesiredServiceState::default_stopped")]
     pub php_desired: DesiredServiceState,
+    #[serde(default)]
+    pub phpmyadmin_enabled: bool,
+    #[serde(default)]
+    pub phpmyadmin_blowfish_secret: Option<String>,
 }
 
 impl PersistedState {
@@ -222,6 +230,8 @@ impl PersistedState {
             apache_desired: DesiredServiceState::Stopped,
             mysql_desired: DesiredServiceState::Stopped,
             php_desired: DesiredServiceState::Stopped,
+            phpmyadmin_enabled: false,
+            phpmyadmin_blowfish_secret: None,
         }
     }
 }

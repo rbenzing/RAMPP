@@ -69,6 +69,9 @@ impl Executor {
                     self.log.push(msg);
                 }
                 SideEffect::PersistDesiredState => self.do_persist(state),
+                SideEffect::TogglePhpMyAdmin(_) => {
+                    // handled in future task
+                }
             }
         }
     }
@@ -221,6 +224,8 @@ impl Executor {
             apache_desired: state.apache.desired,
             mysql_desired: state.mysql.desired,
             php_desired: state.php.desired,
+            phpmyadmin_enabled: state.phpmyadmin_enabled,
+            phpmyadmin_blowfish_secret: None,
         };
         let path = self.config.install_dir.join("ramp.state");
         let result = serde_json::to_vec_pretty(&persisted)

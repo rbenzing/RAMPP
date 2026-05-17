@@ -366,6 +366,14 @@ port = 9000
     }
 
     #[test]
+    fn persisted_state_defaults_phpmyadmin_enabled_to_false() {
+        let json = r#"{"apache_desired":"Stopped","mysql_desired":"Stopped","php_desired":"Stopped"}"#;
+        let persisted: crate::state::PersistedState = serde_json::from_str(json).unwrap();
+        assert!(!persisted.phpmyadmin_enabled);
+        assert!(persisted.phpmyadmin_blowfish_secret.is_none());
+    }
+
+    #[test]
     fn write_default_config_creates_parseable_toml() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();

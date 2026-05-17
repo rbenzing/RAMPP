@@ -17,6 +17,9 @@ pub struct InstallPaths {
     pub php_bin: PathBuf,
     pub php_ini: PathBuf,
     pub php_logs: PathBuf,
+    pub phpmyadmin_dir: PathBuf,
+    pub phpmyadmin_config: PathBuf,
+    pub phpmyadmin_apache_conf: PathBuf,
 }
 
 impl InstallPaths {
@@ -47,6 +50,9 @@ impl InstallPaths {
             php_bin: root.join("php").join("php-cgi.exe"),
             php_ini: root.join("php").join("php.ini"),
             php_logs: root.join("php").join("logs"),
+            phpmyadmin_dir: root.join("phpmyadmin"),
+            phpmyadmin_config: root.join("phpmyadmin").join("config.inc.php"),
+            phpmyadmin_apache_conf: root.join("apache").join("conf").join("phpmyadmin.conf"),
             root,
         })
     }
@@ -247,5 +253,15 @@ mod tests {
         assert!(p.config.starts_with(tmp.path()));
         assert!(p.apache_bin.starts_with(tmp.path()));
         assert!(p.mysql_bin.starts_with(tmp.path()));
+    }
+
+    #[test]
+    fn install_paths_includes_phpmyadmin_paths() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let paths = InstallPaths::from_install_dir(tmp.path()).unwrap();
+        assert!(paths.phpmyadmin_dir.ends_with("phpmyadmin"));
+        assert!(paths.phpmyadmin_config.ends_with("config.inc.php"));
+        assert!(paths.phpmyadmin_apache_conf.ends_with("phpmyadmin.conf"));
     }
 }

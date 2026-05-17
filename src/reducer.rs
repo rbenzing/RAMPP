@@ -310,6 +310,11 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             // The reducer records nothing for Tick.
         }
 
+        // ── phpMyAdmin toggle ────────────────────────────────────────────────
+        Event::TogglePhpMyAdmin | Event::PhpMyAdminToggled(_) => {
+            // handled in future task
+        }
+
         // ── Shutdown all ─────────────────────────────────────────────────────
         Event::ShutdownAll => {
             for svc in [Service::Apache, Service::Mysql, Service::Php] {

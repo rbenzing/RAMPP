@@ -48,10 +48,15 @@ pub enum Event {
 
     // Shutdown
     ShutdownAll,
+
+    // phpMyAdmin
+    TogglePhpMyAdmin,
+    PhpMyAdminToggled(bool),
 }
 
 /// Side effects produced by the reducer. Executed by the executor AFTER state mutation.
 /// Side effects MUST never mutate state directly — they emit follow-up events.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum SideEffect {
     SpawnService(Service),
@@ -61,4 +66,5 @@ pub enum SideEffect {
     StopHealthCheck(Service),
     LogEvent(String),
     PersistDesiredState,
+    TogglePhpMyAdmin(bool),
 }
