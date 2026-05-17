@@ -24,8 +24,7 @@ Alias /phpmyadmin "{pma_dir_s}"
 # SetEnvIf captures the script path relative to /phpmyadmin/ into PMA_SCRIPT.
 # ProxyFCGISetEnvIf then overrides SCRIPT_FILENAME with the absolute path so
 # PHP-CGI finds the file in <install>/phpmyadmin/ instead of doc_root.
-SetEnvIf Request_URI "^/phpmyadmin/(.+\.php)" PMA_SCRIPT=$1
-ProxyFCGISetEnvIf "reqenv('PMA_SCRIPT') != ''" SCRIPT_FILENAME "{pma_dir_s}/%{{reqenv:PMA_SCRIPT}}"
+ProxyFCGISetEnvIf "req_novary('REQUEST_URI') =~ m#^/phpmyadmin/(.+\.php)#" SCRIPT_FILENAME "{pma_dir_s}/$1"
 ProxyPassMatch "^/phpmyadmin/(.+\.php(/.*)?)$" "fcgi://127.0.0.1:{php_port}/$1"
 "#
     )
@@ -170,17 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn apache_conf_sets_script_filename_via_set_env_if() {
+    fn apache_conf_sets_script_filename_via_proxy_fcgi_set_env_if() {
         let tmp = TempDir::new().unwrap();
         let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
-        assert!(
-            conf.contains("SetEnvIf"),
-            "must use SetEnvIf to capture script path into PMA_SCRIPT env var"
-        );
-        assert!(
-            conf.contains("PMA_SCRIPT"),
-            "must capture script path into PMA_SCRIPT for use by ProxyFCGISetEnvIf"
-        );
         assert!(
             conf.contains("ProxyFCGISetEnvIf"),
             "must use ProxyFCGISetEnvIf to override SCRIPT_FILENAME with absolute path"
@@ -188,6 +179,10 @@ mod tests {
         assert!(
             conf.contains("SCRIPT_FILENAME"),
             "must override SCRIPT_FILENAME so PHP-CGI finds files outside doc_root"
+        );
+        assert!(
+            conf.contains("REQUEST_URI"),
+            "must match against REQUEST_URI to extract the script path"
         );
     }
 
