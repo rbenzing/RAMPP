@@ -12,6 +12,8 @@ struct TomlRoot {
     mysql: TomlMysql,
     #[serde(default)]
     php: TomlPhp,
+    #[serde(default)]
+    phpmyadmin: TomlPhpMyAdmin,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,6 +34,27 @@ struct TomlPhp {
 impl Default for TomlPhp {
     fn default() -> Self {
         Self { port: 9000 }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TomlPhpMyAdmin {
+    #[serde(default = "default_mysql_user")]
+    mysql_user: String,
+    #[serde(default)]
+    mysql_password: String,
+}
+
+fn default_mysql_user() -> String {
+    "root".to_string()
+}
+
+impl Default for TomlPhpMyAdmin {
+    fn default() -> Self {
+        Self {
+            mysql_user: default_mysql_user(),
+            mysql_password: String::new(),
+        }
     }
 }
 
@@ -119,8 +142,8 @@ fn validate_and_build(doc: TomlRoot, install_dir: &Path) -> Result<RampConfig, S
             ini: paths.php_ini,
         },
         phpmyadmin: crate::state::PhpMyAdminConfig {
-            mysql_user: "root".to_string(),
-            mysql_password: String::new(),
+            mysql_user: doc.phpmyadmin.mysql_user,
+            mysql_password: doc.phpmyadmin.mysql_password,
         },
     })
 }
@@ -367,7 +390,8 @@ port = 9000
 
     #[test]
     fn persisted_state_defaults_phpmyadmin_enabled_to_false() {
-        let json = r#"{"apache_desired":"Stopped","mysql_desired":"Stopped","php_desired":"Stopped"}"#;
+        let json =
+            r#"{"apache_desired":"Stopped","mysql_desired":"Stopped","php_desired":"Stopped"}"#;
         let persisted: crate::state::PersistedState = serde_json::from_str(json).unwrap();
         assert!(!persisted.phpmyadmin_enabled);
         assert!(persisted.phpmyadmin_blowfish_secret.is_none());
@@ -383,5 +407,54 @@ port = 9000
         assert!(cfg.apache.port >= 1024);
         assert!(cfg.mysql.port >= 1024);
         assert!(cfg.php.port >= 1024);
+    }
+
+    #[test]
+    fn load_config_defaults_phpmyadmin_when_section_absent() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        write_toml(
+            dir,
+            &format!(
+                r#"install_dir = "{}"
+[apache]
+port = 8080
+[mysql]
+port = 3306
+[php]
+port = 9000
+"#,
+                dir.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        let cfg = load_config(dir).unwrap();
+        assert_eq!(cfg.phpmyadmin.mysql_user, "root");
+        assert_eq!(cfg.phpmyadmin.mysql_password, "");
+    }
+
+    #[test]
+    fn load_config_reads_phpmyadmin_credentials() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        write_toml(
+            dir,
+            &format!(
+                r#"install_dir = "{}"
+[apache]
+port = 8080
+[mysql]
+port = 3306
+[php]
+port = 9000
+[phpmyadmin]
+mysql_user = "admin"
+mysql_password = "secret"
+"#,
+                dir.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        let cfg = load_config(dir).unwrap();
+        assert_eq!(cfg.phpmyadmin.mysql_user, "admin");
+        assert_eq!(cfg.phpmyadmin.mysql_password, "secret");
     }
 }
