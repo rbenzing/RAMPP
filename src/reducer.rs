@@ -189,6 +189,10 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     )));
                 }
             }
+            // Auto-disable phpMyAdmin if a required dependency crashes/stops
+            if state.phpmyadmin_enabled && matches!(svc, Service::Mysql | Service::Php) {
+                effects.push(SideEffect::TogglePhpMyAdmin(false));
+            }
         }
 
         Event::ProcessSpawnFailed {
@@ -299,6 +303,13 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
         // ── Config reload ────────────────────────────────────────────────────
         Event::ConfigReloaded(new_config) => {
             state.config = *new_config;
+            // Re-check whether phpmyadmin dir exists under the (possibly new) install_dir.
+            // phpmyadmin_dir_exists is a cache — ConfigReloaded is the designated refresh point.
+            let pma_dir = state.config.install_dir.join("phpmyadmin");
+            state.phpmyadmin_dir_exists = pma_dir.exists() && pma_dir.is_dir();
+            if state.phpmyadmin_enabled && !state.phpmyadmin_dir_exists {
+                effects.push(SideEffect::TogglePhpMyAdmin(false));
+            }
             effects.push(SideEffect::LogEvent(
                 "config reloaded — restart services to apply changes".to_string(),
             ));
@@ -310,9 +321,33 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             // The reducer records nothing for Tick.
         }
 
-        // ── phpMyAdmin toggle ────────────────────────────────────────────────
-        Event::TogglePhpMyAdmin | Event::PhpMyAdminToggled(_) => {
-            // handled in future task
+        // ── phpMyAdmin toggle ─────────────────────────────────────────────────
+        Event::TogglePhpMyAdmin => {
+            let all_running = state.apache.state == ServiceState::Running
+                && state.mysql.state == ServiceState::Running
+                && state.php.state == ServiceState::Running;
+
+            if !state.phpmyadmin_dir_exists {
+                effects.push(SideEffect::LogEvent(
+                    "phpMyAdmin: directory not found — cannot toggle".to_string(),
+                ));
+            } else if !all_running {
+                effects.push(SideEffect::LogEvent(
+                    "phpMyAdmin: MySQL, PHP, and Apache must all be running".to_string(),
+                ));
+            } else {
+                let target = !state.phpmyadmin_enabled;
+                effects.push(SideEffect::TogglePhpMyAdmin(target));
+            }
+        }
+
+        Event::PhpMyAdminToggled(enabled) => {
+            state.phpmyadmin_enabled = enabled;
+            effects.push(SideEffect::PersistDesiredState);
+            effects.push(SideEffect::LogEvent(format!(
+                "phpMyAdmin: {}",
+                if enabled { "enabled" } else { "disabled" }
+            )));
         }
 
         // ── Shutdown all ─────────────────────────────────────────────────────
@@ -950,6 +985,164 @@ mod tests {
         // At MAX_RETRIES (4) and beyond — no more retries
         assert_eq!(retry_delay(4), None);
         assert_eq!(retry_delay(100), None);
+    }
+
+    // ── phpMyAdmin toggle ─────────────────────────────────────────────────
+
+    fn make_state_all_running() -> AppState {
+        let mut state = make_state();
+        state.apache.state = ServiceState::Running;
+        state.mysql.state = ServiceState::Running;
+        state.php.state = ServiceState::Running;
+        state.phpmyadmin_dir_exists = true;
+        state
+    }
+
+    #[test]
+    fn toggle_phpmyadmin_on_when_services_running_emits_side_effect() {
+        let state = make_state_all_running();
+        let (new_state, effects) = reducer(state, Event::TogglePhpMyAdmin);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(true))));
+        // State not yet updated — waits for PhpMyAdminToggled
+        assert!(!new_state.phpmyadmin_enabled);
+    }
+
+    #[test]
+    fn toggle_phpmyadmin_off_when_enabled_emits_side_effect() {
+        let mut state = make_state_all_running();
+        state.phpmyadmin_enabled = true;
+        let (_, effects) = reducer(state, Event::TogglePhpMyAdmin);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(false))));
+    }
+
+    #[test]
+    fn toggle_phpmyadmin_ignored_when_mysql_not_running() {
+        let mut state = make_state_all_running();
+        state.mysql.state = ServiceState::Stopped;
+        let (new_state, effects) = reducer(state, Event::TogglePhpMyAdmin);
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(_))));
+        assert!(effects.iter().any(|e| matches!(e, SideEffect::LogEvent(_))));
+        assert!(!new_state.phpmyadmin_enabled);
+    }
+
+    #[test]
+    fn toggle_phpmyadmin_ignored_when_php_not_running() {
+        let mut state = make_state_all_running();
+        state.php.state = ServiceState::Stopped;
+        let (_, effects) = reducer(state, Event::TogglePhpMyAdmin);
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(_))));
+    }
+
+    #[test]
+    fn toggle_phpmyadmin_ignored_when_apache_not_running() {
+        let mut state = make_state_all_running();
+        state.apache.state = ServiceState::Stopped;
+        let (_, effects) = reducer(state, Event::TogglePhpMyAdmin);
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(_))));
+    }
+
+    #[test]
+    fn toggle_phpmyadmin_ignored_when_dir_missing() {
+        let mut state = make_state_all_running();
+        state.phpmyadmin_dir_exists = false;
+        let (_, effects) = reducer(state, Event::TogglePhpMyAdmin);
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(_))));
+    }
+
+    #[test]
+    fn phpmyadmin_toggled_true_sets_enabled_and_persists() {
+        let state = make_state();
+        let (new_state, effects) = reducer(state, Event::PhpMyAdminToggled(true));
+        assert!(new_state.phpmyadmin_enabled);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::PersistDesiredState)));
+    }
+
+    #[test]
+    fn phpmyadmin_toggled_false_clears_enabled_and_persists() {
+        let mut state = make_state();
+        state.phpmyadmin_enabled = true;
+        let (new_state, effects) = reducer(state, Event::PhpMyAdminToggled(false));
+        assert!(!new_state.phpmyadmin_enabled);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::PersistDesiredState)));
+    }
+
+    #[test]
+    fn mysql_process_exit_while_phpmyadmin_enabled_emits_toggle_off() {
+        let mut state = make_state_all_running();
+        state.phpmyadmin_enabled = true;
+        let (_, effects) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Mysql,
+                exit_code: Some(1),
+            },
+        );
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(false))));
+    }
+
+    #[test]
+    fn php_process_exit_while_phpmyadmin_enabled_emits_toggle_off() {
+        let mut state = make_state_all_running();
+        state.phpmyadmin_enabled = true;
+        let (_, effects) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Php,
+                exit_code: Some(1),
+            },
+        );
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(false))));
+    }
+
+    #[test]
+    fn mysql_process_exit_while_phpmyadmin_disabled_does_not_emit_toggle() {
+        let mut state = make_state_all_running();
+        state.phpmyadmin_enabled = false;
+        let (_, effects) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Mysql,
+                exit_code: Some(1),
+            },
+        );
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(_))));
+    }
+
+    #[test]
+    fn config_reloaded_rechecks_phpmyadmin_dir_exists() {
+        let mut state = make_state();
+        state.phpmyadmin_enabled = true;
+        state.phpmyadmin_dir_exists = true;
+        let mut new_config = state.config.clone();
+        // Use a path that definitely does not have a phpmyadmin subdir
+        new_config.install_dir = std::path::PathBuf::from("C:\\nonexistent_ramp_test_dir_12345");
+        let (new_state, effects) = reducer(state, Event::ConfigReloaded(Box::new(new_config)));
+        assert!(!new_state.phpmyadmin_dir_exists);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(false))));
     }
 
     // ── AutoRetry ignored when not Crashed ───────────────────────────────
