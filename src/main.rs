@@ -113,6 +113,68 @@ fn main() {
         app_state.mysql.desired = DesiredServiceState::Stopped;
     }
 
+    // --- phpMyAdmin startup reconciliation ----------------------------------
+    // Must run after AppState and RampConfig are ready, before the event loop starts.
+    // Ensures phpmyadmin.conf always exists on disk (Apache Include never fails),
+    // and force-disables phpMyAdmin if its directory is missing.
+    {
+        let phpmyadmin_dir = config.install_dir.join("phpmyadmin");
+        let phpmyadmin_dir_exists = phpmyadmin_dir.exists();
+        app_state.phpmyadmin_dir_exists = phpmyadmin_dir_exists;
+
+        if persisted.phpmyadmin_enabled && !phpmyadmin_dir_exists {
+            log::warn!(
+                "phpMyAdmin enabled in state but not found at {} — disabling",
+                phpmyadmin_dir.display()
+            );
+            app_state.phpmyadmin_enabled = false;
+            if let Err(e) = phpmyadmin_conf::write_phpmyadmin_apache_conf_disabled(&config) {
+                log::error!("Failed to write phpmyadmin.conf (disabled): {e}");
+            }
+            // Persist the force-disabled state so it survives restart
+            let state_path = install_dir.join("ramp.state");
+            let mut p = persisted.clone();
+            p.phpmyadmin_enabled = false;
+            match serde_json::to_vec_pretty(&p) {
+                Ok(data) => {
+                    if let Err(e) = config::atomic_write(&state_path, &data) {
+                        log::error!("Failed to persist phpmyadmin disabled state: {e}");
+                    }
+                }
+                Err(e) => log::error!("Failed to serialize phpmyadmin disabled state: {e}"),
+            }
+        } else if persisted.phpmyadmin_enabled && phpmyadmin_dir_exists {
+            app_state.phpmyadmin_enabled = true;
+            let blowfish = persisted
+                .phpmyadmin_blowfish_secret
+                .clone()
+                .unwrap_or_else(|| phpmyadmin_conf::generate_blowfish_secret(&config.install_dir));
+            let config_path = phpmyadmin_dir.join("config.inc.php");
+            if phpmyadmin_conf::is_ramp_owned_config(&config_path) || !config_path.exists() {
+                let content = phpmyadmin_conf::generate_config_inc_php(
+                    config.mysql.port,
+                    &config.phpmyadmin.mysql_user,
+                    &config.phpmyadmin.mysql_password,
+                    &blowfish,
+                );
+                if let Err(e) = config::atomic_write(&config_path, content.as_bytes()) {
+                    log::error!("Failed to write phpmyadmin config.inc.php: {e}");
+                }
+            }
+            if let Err(e) =
+                phpmyadmin_conf::write_phpmyadmin_apache_conf_enabled(&config, config.php.port)
+            {
+                log::error!("Failed to write phpmyadmin.conf (enabled): {e}");
+            }
+        } else {
+            // phpmyadmin_enabled == false: write empty conf (idempotent)
+            app_state.phpmyadmin_enabled = false;
+            if let Err(e) = phpmyadmin_conf::write_phpmyadmin_apache_conf_disabled(&config) {
+                log::error!("Failed to write phpmyadmin.conf (disabled): {e}");
+            }
+        }
+    }
+
     let shared_state = Arc::new(Mutex::new(app_state.clone()));
     let shared_state_writer = shared_state.clone();
 
