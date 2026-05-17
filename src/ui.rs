@@ -53,12 +53,21 @@ impl eframe::App for RampApp {
             ui.heading("RAMP");
             ui.separator();
 
+            let mysql_running = state.mysql.state == ServiceState::Running;
+            let php_running = state.php.state == ServiceState::Running;
+            let apache_running = state.apache.state == ServiceState::Running;
+
             service_row(
                 ui,
                 &self.tx,
                 Service::Apache,
                 &state.apache,
                 state.config.apache.port,
+                false,
+                false,
+                mysql_running,
+                php_running,
+                apache_running,
             );
             service_row(
                 ui,
@@ -66,6 +75,11 @@ impl eframe::App for RampApp {
                 Service::Mysql,
                 &state.mysql,
                 state.config.mysql.port,
+                state.phpmyadmin_enabled,
+                state.phpmyadmin_dir_exists,
+                mysql_running,
+                php_running,
+                apache_running,
             );
             service_row(
                 ui,
@@ -73,6 +87,11 @@ impl eframe::App for RampApp {
                 Service::Php,
                 &state.php,
                 state.config.php.port,
+                false,
+                false,
+                mysql_running,
+                php_running,
+                apache_running,
             );
 
             ui.separator();
@@ -121,12 +140,18 @@ impl eframe::App for RampApp {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn service_row(
     ui: &mut egui::Ui,
     tx: &Sender<Event>,
     svc: Service,
     status: &crate::state::ServiceStatus,
     configured_port: u16,
+    phpmyadmin_enabled: bool,
+    phpmyadmin_dir_exists: bool,
+    mysql_running: bool,
+    php_running: bool,
+    apache_running: bool,
 ) {
     ui.horizontal(|ui| {
         let dot_color = state_indicator(status.state);
@@ -188,6 +213,36 @@ fn service_row(
             }
             if ui.button("Start").clicked() {
                 let _ = tx.send(Event::StartService(svc));
+            }
+
+            // Admin button — only for MySQL row
+            if svc == Service::Mysql {
+                let all_up = mysql_running && php_running && apache_running;
+                let can_admin = all_up && phpmyadmin_dir_exists;
+
+                let btn_label = if phpmyadmin_enabled {
+                    "Admin ■"
+                } else {
+                    "Admin ▶"
+                };
+
+                let btn = egui::Button::new(btn_label);
+                let response = ui.add_enabled(can_admin, btn);
+
+                let clicked = response.clicked();
+
+                if !can_admin {
+                    let tooltip = if !phpmyadmin_dir_exists {
+                        "phpMyAdmin not found in install directory"
+                    } else {
+                        "MySQL, PHP, and Apache must all be running"
+                    };
+                    response.on_disabled_hover_text(tooltip);
+                }
+
+                if clicked {
+                    let _ = tx.send(Event::TogglePhpMyAdmin);
+                }
             }
         });
     });
