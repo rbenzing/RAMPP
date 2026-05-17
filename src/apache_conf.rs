@@ -97,6 +97,9 @@ LogLevel warn
     AddType application/x-compress .Z
     AddType application/x-gzip .gz .tgz
 </IfModule>
+
+# phpMyAdmin — managed by RAMP (do not remove this line)
+Include "conf/phpmyadmin.conf"
 "#
     )
 }
@@ -211,5 +214,16 @@ mod tests {
         std::fs::write(&cfg.apache.conf, b"custom").unwrap();
         ensure_httpd_conf(&cfg).unwrap();
         assert_eq!(std::fs::read(&cfg.apache.conf).unwrap(), b"custom");
+    }
+
+    #[test]
+    fn generates_conf_with_phpmyadmin_include() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let conf = generate_httpd_conf(&cfg);
+        assert!(
+            conf.contains(r#"Include "conf/phpmyadmin.conf""#),
+            "httpd.conf must include phpmyadmin.conf"
+        );
     }
 }
