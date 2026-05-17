@@ -1,9 +1,6 @@
 use crate::state::RampConfig;
 
-pub fn generate_phpmyadmin_apache_conf(
-    install_dir: &std::path::Path,
-    php_port: u16,
-) -> String {
+pub fn generate_phpmyadmin_apache_conf(install_dir: &std::path::Path, php_port: u16) -> String {
     let pma_dir = install_dir.join("phpmyadmin");
     let pma_dir_s = pma_dir.display().to_string().replace('\\', "/");
 
@@ -66,41 +63,37 @@ pub fn generate_blowfish_secret(install_dir: &std::path::Path) -> String {
         .to_string()
         .bytes()
         .enumerate()
-        .fold(0u64, |acc, (i, b)| acc.wrapping_add((b as u64).wrapping_mul(i as u64 + 1)));
+        .fold(0u64, |acc, (i, b)| {
+            acc.wrapping_add((b as u64).wrapping_mul(i as u64 + 1))
+        });
     let combined = (nanos as u64).wrapping_mul(0x9e3779b97f4a7c15)
         ^ (pid as u64).wrapping_mul(0x6c62272e07bb0142)
         ^ path_hash;
     let half = format!("{combined:016x}");
-    format!("{half}{half}")
-        .chars()
-        .take(32)
-        .collect()
+    format!("{half}{half}").chars().take(32).collect()
 }
 
-pub fn write_phpmyadmin_apache_conf_enabled(
-    cfg: &RampConfig,
-    php_port: u16,
-) -> Result<(), String> {
-    let conf_path = cfg.install_dir
+pub fn write_phpmyadmin_apache_conf_enabled(cfg: &RampConfig, php_port: u16) -> Result<(), String> {
+    let conf_path = cfg
+        .install_dir
         .join("apache")
         .join("conf")
         .join("phpmyadmin.conf");
     let dir = conf_path.parent().ok_or("phpmyadmin.conf has no parent")?;
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
     let content = generate_phpmyadmin_apache_conf(&cfg.install_dir, php_port);
     crate::config::atomic_write(&conf_path, content.as_bytes())
         .map_err(|e| format!("cannot write phpmyadmin.conf: {e}"))
 }
 
 pub fn write_phpmyadmin_apache_conf_disabled(cfg: &RampConfig) -> Result<(), String> {
-    let conf_path = cfg.install_dir
+    let conf_path = cfg
+        .install_dir
         .join("apache")
         .join("conf")
         .join("phpmyadmin.conf");
     let dir = conf_path.parent().ok_or("phpmyadmin.conf has no parent")?;
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
     crate::config::atomic_write(&conf_path, b"")
         .map_err(|e| format!("cannot write phpmyadmin.conf: {e}"))
 }
@@ -181,7 +174,8 @@ mod tests {
 
     #[test]
     fn config_inc_php_contains_credentials() {
-        let php = generate_config_inc_php(3306, "admin", "pass123", "secret12345678901234567890123456");
+        let php =
+            generate_config_inc_php(3306, "admin", "pass123", "secret12345678901234567890123456");
         assert!(php.contains("'admin'"));
         assert!(php.contains("'pass123'"));
         assert!(php.contains("3306"));
@@ -228,7 +222,10 @@ mod tests {
     fn blowfish_secret_is_alphanumeric() {
         let tmp = TempDir::new().unwrap();
         let secret = generate_blowfish_secret(tmp.path());
-        assert!(secret.chars().all(|c| c.is_ascii_hexdigit()), "blowfish_secret must be hex");
+        assert!(
+            secret.chars().all(|c| c.is_ascii_hexdigit()),
+            "blowfish_secret must be hex"
+        );
     }
 
     #[test]
@@ -238,8 +235,12 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("apache").join("conf")).unwrap();
         write_phpmyadmin_apache_conf_enabled(&cfg, 9000).unwrap();
         let content = std::fs::read_to_string(
-            tmp.path().join("apache").join("conf").join("phpmyadmin.conf")
-        ).unwrap();
+            tmp.path()
+                .join("apache")
+                .join("conf")
+                .join("phpmyadmin.conf"),
+        )
+        .unwrap();
         assert!(content.contains("Alias /phpmyadmin"));
     }
 
@@ -250,8 +251,12 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("apache").join("conf")).unwrap();
         write_phpmyadmin_apache_conf_disabled(&cfg).unwrap();
         let content = std::fs::read_to_string(
-            tmp.path().join("apache").join("conf").join("phpmyadmin.conf")
-        ).unwrap();
+            tmp.path()
+                .join("apache")
+                .join("conf")
+                .join("phpmyadmin.conf"),
+        )
+        .unwrap();
         assert!(content.is_empty());
     }
 }
