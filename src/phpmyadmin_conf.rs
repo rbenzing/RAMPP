@@ -14,10 +14,19 @@ Alias /phpmyadmin "{pma_dir_s}"
 </Directory>
 
 # Route .php files under /phpmyadmin through PHP-CGI FastCGI.
-# Uses ProxyPassMatch (not FilesMatch+SetHandler) to avoid the Windows
-# mod_proxy_fcgi drive-letter URL parsing bug (same workaround as httpd.conf).
-ProxyFCGIBackendType GENERIC
-ProxyPassMatch "^/phpmyadmin/(.+\.php(/.*)?)$" "fcgi://127.0.0.1:{php_port}/phpmyadmin/$1"
+#
+# Why FcgiParams SCRIPT_FILENAME instead of doc_root-relative paths:
+# phpMyAdmin lives at <install>/phpmyadmin/, not under apache/htdocs/ (doc_root).
+# PHP-CGI resolves script paths as doc_root + fcgi-url-path, so a relative path
+# would point at the wrong directory. FcgiParams injects SCRIPT_FILENAME directly
+# into the FastCGI param set — bypassing both the fcgi:// URL parser (avoiding the
+# Windows drive-letter bug) and the doc_root join. The named capture %{{env:MATCH_PHPSCRIPT}}
+# strips the leading "/phpmyadmin/" prefix so we get the path relative to pma_dir.
+<LocationMatch "^/phpmyadmin/(?<phpscript>.+\.php(/.*)?)$">
+    FcgiParams SCRIPT_FILENAME "{pma_dir_s}/%{{env:MATCH_PHPSCRIPT}}"
+    ProxyFCGIBackendType GENERIC
+    ProxyPassMatch "^/phpmyadmin/.+\.php" "fcgi://127.0.0.1:{php_port}/"
+</LocationMatch>
 "#
     )
 }
@@ -158,6 +167,20 @@ mod tests {
         let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
         assert!(conf.contains("ProxyPassMatch"));
         assert!(conf.contains("fcgi://127.0.0.1:9000"));
+    }
+
+    #[test]
+    fn apache_conf_uses_fcgi_params_script_filename() {
+        let tmp = TempDir::new().unwrap();
+        let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
+        assert!(
+            conf.contains("FcgiParams SCRIPT_FILENAME"),
+            "must use FcgiParams to set SCRIPT_FILENAME (doc_root-relative paths point at wrong dir)"
+        );
+        assert!(
+            conf.contains("MATCH_PHPSCRIPT"),
+            "must use named capture to strip /phpmyadmin/ prefix"
+        );
     }
 
     #[test]
