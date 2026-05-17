@@ -6,26 +6,25 @@ pub fn generate_phpmyadmin_apache_conf(install_dir: &std::path::Path, php_port: 
 
     format!(
         r#"# RAMP — phpMyAdmin enabled (do not remove this line)
+#
+# Alias maps /phpmyadmin/ → the phpMyAdmin install directory. Apache's normal
+# URI-to-filename translation produces an absolute Windows path (C:/.../index.php).
+# The <FilesMatch> block uses the same "//./" SetHandler trick + GENERIC backend
+# as httpd.conf — required on Windows to dodge the mod_proxy_fcgi URL bug that
+# would otherwise produce a malformed "//host:portC:/path..." URL.
+# See the long comment in httpd.conf for the full explanation.
 Alias /phpmyadmin "{pma_dir_s}"
 <Directory "{pma_dir_s}">
     Options None
     AllowOverride None
     Require local
-</Directory>
+    DirectoryIndex index.php
 
-# Route .php files under /phpmyadmin through PHP-CGI FastCGI.
-#
-# Why SetEnvIf + ProxyFCGISetEnvIf at server scope (not <LocationMatch>):
-# The global ProxyPassMatch in httpd.conf runs during URI translation, before
-# <Location> sections fire — <LocationMatch>-scoped ProxyPass cannot override it.
-# The global rule excludes /phpmyadmin/ via a negative lookahead, so this
-# ProxyPassMatch handles phpMyAdmin PHP files exclusively.
-#
-# SetEnvIf captures the script path relative to /phpmyadmin/ into PMA_SCRIPT.
-# ProxyFCGISetEnvIf then overrides SCRIPT_FILENAME with the absolute path so
-# PHP-CGI finds the file in <install>/phpmyadmin/ instead of doc_root.
-ProxyFCGISetEnvIf "req_novary('REQUEST_URI') =~ m#^/phpmyadmin/(.+\.php)#" SCRIPT_FILENAME "{pma_dir_s}/$1"
-ProxyPassMatch "^/phpmyadmin/(.+\.php(/.*)?)$" "fcgi://127.0.0.1:{php_port}/$1"
+    <FilesMatch "\.php$">
+        SetHandler "proxy:fcgi://127.0.0.1:{php_port}//./"
+        ProxyFCGIBackendType GENERIC
+    </FilesMatch>
+</Directory>
 "#
     )
 }
@@ -161,28 +160,19 @@ mod tests {
     }
 
     #[test]
-    fn apache_conf_contains_proxy_pass_match_for_php() {
+    fn apache_conf_uses_variant_a_workaround() {
         let tmp = TempDir::new().unwrap();
         let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
-        assert!(conf.contains("ProxyPassMatch"));
-        assert!(conf.contains("fcgi://127.0.0.1:9000"));
-    }
-
-    #[test]
-    fn apache_conf_sets_script_filename_via_proxy_fcgi_set_env_if() {
-        let tmp = TempDir::new().unwrap();
-        let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
+        // Variant A: SetHandler "proxy:fcgi://host:port//./" + ProxyFCGIBackendType
+        // GENERIC inside the same FilesMatch block. Empirically verified fix for
+        // the Windows drive-letter URL parsing bug in mod_proxy_fcgi 2.4.66.
         assert!(
-            conf.contains("ProxyFCGISetEnvIf"),
-            "must use ProxyFCGISetEnvIf to override SCRIPT_FILENAME with absolute path"
+            conf.contains("SetHandler \"proxy:fcgi://127.0.0.1:9000//./\""),
+            "SetHandler must use //./ suffix to avoid Windows URL parse bug"
         );
         assert!(
-            conf.contains("SCRIPT_FILENAME"),
-            "must override SCRIPT_FILENAME so PHP-CGI finds files outside doc_root"
-        );
-        assert!(
-            conf.contains("REQUEST_URI"),
-            "must match against REQUEST_URI to extract the script path"
+            conf.contains("ProxyFCGIBackendType GENERIC"),
+            "ProxyFCGIBackendType GENERIC required inside the FilesMatch block"
         );
     }
 
@@ -191,6 +181,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
         assert!(conf.contains("Require local"));
+    }
+
+    #[test]
+    fn apache_conf_has_directory_index() {
+        let tmp = TempDir::new().unwrap();
+        let conf = generate_phpmyadmin_apache_conf(tmp.path(), 9000);
+        assert!(
+            conf.contains("DirectoryIndex index.php"),
+            "must set DirectoryIndex so /phpmyadmin/ resolves to index.php"
+        );
     }
 
     #[test]

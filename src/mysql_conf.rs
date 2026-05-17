@@ -12,6 +12,12 @@ pub fn generate_my_ini_with_port(cfg: &RampConfig, port: u16) -> String {
     let mysql_dir_path = cfg.install_dir.join("mysql");
     let mysql_dir = mysql_dir_path.display().to_string().replace('\\', "/");
     let data_dir = cfg.mysql.data_dir.display().to_string().replace('\\', "/");
+    let logs_dir = cfg
+        .install_dir
+        .join("logs")
+        .display()
+        .to_string()
+        .replace('\\', "/");
 
     format!(
         r#"# RAMP — generated my.ini
@@ -26,7 +32,7 @@ character-set-server  = utf8mb4
 collation-server      = utf8mb4_unicode_ci
 
 # Logging
-log_error = "{mysql_dir}/logs/mysqld.log"
+log_error = "{logs_dir}/mysql_error.log"
 general_log = 0
 
 # InnoDB
@@ -72,8 +78,8 @@ pub fn ensure_my_ini(cfg: &RampConfig) -> Result<(), String> {
 pub fn initialize_mysql(cfg: &RampConfig) -> Result<(), String> {
     log::info!("MySQL: initializing data directory (first run)…");
 
-    let mysql_logs = cfg.install_dir.join("mysql").join("logs");
-    std::fs::create_dir_all(&mysql_logs).map_err(|e| format!("cannot create mysql/logs: {e}"))?;
+    let mysql_logs = cfg.install_dir.join("logs");
+    std::fs::create_dir_all(&mysql_logs).map_err(|e| format!("cannot create logs: {e}"))?;
 
     // mysqld refuses --initialize-insecure if the data dir is non-empty.
     // Clear any leftovers from a prior failed init so this run can succeed.

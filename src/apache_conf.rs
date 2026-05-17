@@ -11,6 +11,8 @@ pub fn generate_httpd_conf(cfg: &RampConfig) -> String {
 pub fn generate_httpd_conf_with_ports(cfg: &RampConfig, port: u16, php_port: u16) -> String {
     let apache_dir = cfg.install_dir.join("apache");
     let apache_dir = apache_dir.display().to_string().replace('\\', "/");
+    let logs_dir = cfg.install_dir.join("logs");
+    let logs_dir = logs_dir.display().to_string().replace('\\', "/");
 
     format!(
         r#"# RAMP — generated httpd.conf (do not remove this line — RAMP uses it to detect generated configs)
@@ -66,30 +68,36 @@ DocumentRoot "{apache_dir}/htdocs"
 
 # Proxy .php requests to PHP-CGI FastCGI listener.
 #
-# Why this is the way it is:
-# - The naive `<FilesMatch> + SetHandler "proxy:fcgi://..."` pattern breaks on
-#   Windows because mod_proxy_fcgi appends the script's drive-lettered path
-#   directly to the proxy URL ("fcgi://host:9000c:/..."), which the URL parser
-#   sees as a malformed authority → "DNS lookup failure".
-# - ProxyPassMatch with an explicit script-path target avoids the URL parsing
-#   bug. The capture group `$1` holds the relative script path; PHP-CGI then
-#   joins it against `doc_root` from php.ini to find the real file. We rely on
-#   `doc_root` (set in php.ini) rather than absolute paths in the proxy URL,
-#   because absolute Windows paths in fcgi:// URLs trigger the same parser bug.
-ProxyFCGIBackendType GENERIC
-ProxyPassMatch "^/(?!phpmyadmin/)(.+\.php(/.*)?)$" "fcgi://127.0.0.1:{php_port}/$1"
+# Windows mod_proxy_fcgi bug + workaround (Apache Lounge thread t=8899):
+# On Windows, when SetHandler="proxy:fcgi://host:port", mod_proxy_fcgi appends
+# the resolved script filename (e.g. "C:/path/to/file.php") directly onto the
+# URL authority, producing "//host:portC:/path...". The URL parser then sees
+# the host as "127.0.0.1:9000c" → DNS lookup failure → "AH00898".
+#
+# Variant A workaround (empirically verified on Apache 2.4.66 + PHP 8.5 CGI):
+# - Suffix the SetHandler URL with "//./" so the URL has a non-empty path
+#   component before the filename is appended. This closes the authority parse
+#   correctly: "//host:port//./C:/path..." → host="host:port", path="/./C:/...".
+# - ProxyFCGIBackendType GENERIC MUST be inside the same <FilesMatch> block.
+#   It tells mod_proxy_fcgi to not apply PHP-FPM-specific SCRIPT_FILENAME
+#   mangling (which on Windows would re-introduce the corruption) and to
+#   strip the "proxy:fcgi://" prefix that PHP-CGI cannot handle (unlike FPM).
+<FilesMatch "\.php$">
+    SetHandler "proxy:fcgi://127.0.0.1:{php_port}//./"
+    ProxyFCGIBackendType GENERIC
+</FilesMatch>
 
 # Deny .htaccess and .htpasswd access
 <Files ".ht*">
     Require all denied
 </Files>
 
-ErrorLog "logs/error.log"
+ErrorLog "{logs_dir}/apache_error.log"
 LogLevel warn
 
 <IfModule log_config_module>
     LogFormat "%h %l %u %t \"%r\" %>s %b" common
-    CustomLog "logs/access.log" common
+    CustomLog "{logs_dir}/apache_access.log" common
 </IfModule>
 
 <IfModule mime_module>
@@ -193,19 +201,33 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
         let conf = generate_httpd_conf(&cfg);
-        assert!(conf.contains("fcgi://127.0.0.1:9000"));
-        assert!(conf.contains("ProxyPassMatch"));
+        // Variant A: SetHandler URL must end with "//./" to dodge the
+        // Windows mod_proxy_fcgi drive-letter URL parsing bug.
+        assert!(
+            conf.contains("SetHandler \"proxy:fcgi://127.0.0.1:9000//./\""),
+            "SetHandler must use //./ suffix to avoid Windows URL parse bug"
+        );
         assert!(conf.contains("mod_proxy_fcgi.so"));
     }
 
     #[test]
-    fn global_proxy_pass_match_excludes_phpmyadmin() {
+    fn proxy_fcgi_backend_type_generic_is_in_filesmatch_block() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
         let conf = generate_httpd_conf(&cfg);
+        // GENERIC must be INSIDE the <FilesMatch> block, not at server scope.
+        // At server scope it gets overridden by FPM-mode defaults inside the
+        // FilesMatch and the Windows URL bug returns. Verified empirically.
+        let filesmatch_block = conf
+            .split("<FilesMatch \"\\.php$\">")
+            .nth(1)
+            .unwrap_or("")
+            .split("</FilesMatch>")
+            .next()
+            .unwrap_or("");
         assert!(
-            conf.contains("(?!phpmyadmin/)"),
-            "global ProxyPassMatch must exclude /phpmyadmin/ so phpmyadmin.conf handles those requests"
+            filesmatch_block.contains("ProxyFCGIBackendType GENERIC"),
+            "ProxyFCGIBackendType GENERIC must be inside the <FilesMatch> block"
         );
     }
 

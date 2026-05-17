@@ -3,7 +3,10 @@
 # Runtime binaries and data — not committed to source control
 /apache/
 /mysql/
+/php/
+/phpmyadmin/
 /logs/
+/sources/
 
 # Runtime state files
 ramp.state

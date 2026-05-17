@@ -4,13 +4,18 @@ use crate::state::RampConfig;
 /// Only called when the file does not already exist.
 pub fn generate_php_ini(cfg: &RampConfig) -> String {
     let php_dir = cfg.install_dir.join("php");
-    let php_dir_s = php_dir.display().to_string().replace('\\', "/");
     let ext_dir = php_dir.join("ext");
     let ext_dir_s = ext_dir.display().to_string().replace('\\', "/");
-    let doc_root = cfg
+    let logs_dir = cfg
         .install_dir
-        .join("apache")
-        .join("htdocs")
+        .join("logs")
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let session_dir = cfg
+        .install_dir
+        .join("tmp")
+        .join("sessions")
         .display()
         .to_string()
         .replace('\\', "/");
@@ -21,7 +26,8 @@ pub fn generate_php_ini(cfg: &RampConfig) -> String {
 engine = On
 short_open_tag = Off
 precision = 14
-output_buffering = 4096
+; output_buffering must be Off — numbered values cause blank pages in phpMyAdmin
+output_buffering = Off
 zlib.output_compression = Off
 implicit_flush = Off
 serialize_precision = -1
@@ -35,7 +41,7 @@ error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
 display_errors = On
 display_startup_errors = On
 log_errors = On
-error_log = "{php_dir}/logs/php_errors.log"
+error_log = "{logs_dir}/php_errors.log"
 variables_order = "GPCS"
 request_order = "GP"
 register_argc_argv = Off
@@ -43,11 +49,15 @@ auto_globals_jit = On
 post_max_size = 64M
 default_mimetype = "text/html"
 default_charset = "UTF-8"
-doc_root = "{doc_root}"
+; doc_root must be empty — a non-empty value causes PHP-CGI to reject SCRIPT_FILENAME
+; paths that don't start with doc_root, producing "No input file specified" for phpMyAdmin
+; (which lives outside apache/htdocs). SCRIPT_FILENAME is set explicitly via ProxyFCGISetEnvIf.
+doc_root =
 user_dir =
 cgi.fix_pathinfo = 1
 cgi.force_redirect = 0
-cgi.discard_path = 0
+; discard_path=1 lets PHP-CGI handle PATH_INFO URLs (e.g. index.php/route) used by phpMyAdmin
+cgi.discard_path = 1
 extension_dir = "{ext_dir}"
 enable_dl = Off
 file_uploads = On
@@ -56,6 +66,22 @@ max_file_uploads = 20
 allow_url_fopen = On
 allow_url_include = Off
 default_socket_timeout = 60
+
+; Extensions required by phpMyAdmin 5.x
+extension=mysqli
+extension=openssl
+extension=mbstring
+
+; Extensions useful for local development — uncomment as needed
+;extension=curl
+;extension=fileinfo
+;extension=gd
+;extension=intl
+;extension=exif
+;extension=pdo_mysql
+;extension=pdo_sqlite
+;extension=sqlite3
+;extension=zip
 
 [CLI Server]
 cli_server.color = On
@@ -100,6 +126,7 @@ bcmath.scale = 0
 
 [Session]
 session.save_handler = files
+session.save_path = "{session_dir}"
 session.use_strict_mode = 0
 session.use_cookies = 1
 session.use_only_cookies = 1
@@ -121,24 +148,10 @@ session.use_trans_sid = 0
 session.sid_length = 26
 session.trans_sid_tags = "a=href,area=href,frame=src,form="
 session.sid_bits_per_character = 5
-
-; Common extensions for local development — uncomment as needed
-;extension=curl
-;extension=fileinfo
-;extension=gd
-;extension=intl
-;extension=mbstring
-;extension=exif
-;extension=mysqli
-;extension=openssl
-;extension=pdo_mysql
-;extension=pdo_sqlite
-;extension=sqlite3
-;extension=zip
 "#,
-        php_dir = php_dir_s,
         ext_dir = ext_dir_s,
-        doc_root = doc_root,
+        logs_dir = logs_dir,
+        session_dir = session_dir,
         mysql_port = cfg.mysql.port,
     )
 }
@@ -156,10 +169,10 @@ pub fn ensure_php_ini(cfg: &RampConfig) -> Result<(), String> {
         .map_err(|e| format!("cannot write php.ini: {e}"))
 }
 
-/// Ensure the php/logs directory exists.
+/// Ensure the root logs directory exists (used by PHP, Apache, and MySQL).
 pub fn ensure_php_dirs(cfg: &RampConfig) -> Result<(), String> {
-    let logs_dir = cfg.install_dir.join("php").join("logs");
-    std::fs::create_dir_all(&logs_dir).map_err(|e| format!("cannot create php/logs: {e}"))
+    let logs_dir = cfg.install_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir).map_err(|e| format!("cannot create logs: {e}"))
 }
 
 #[cfg(test)]
@@ -202,6 +215,49 @@ mod tests {
         let ini = generate_php_ini(&cfg);
         assert!(ini.contains("mysqli.default_port = 3306"));
         assert!(ini.contains("expose_php = Off"));
+    }
+
+    #[test]
+    fn doc_root_is_empty_for_phpmyadmin_compatibility() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let ini = generate_php_ini(&cfg);
+        // doc_root must be empty — a non-empty value causes PHP-CGI to reject SCRIPT_FILENAME
+        // paths outside it, producing "No input file specified" for phpMyAdmin.
+        assert!(
+            ini.contains("\ndoc_root =\n"),
+            "doc_root must be empty so PHP-CGI accepts SCRIPT_FILENAME from ProxyFCGISetEnvIf"
+        );
+    }
+
+    #[test]
+    fn required_extensions_are_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let ini = generate_php_ini(&cfg);
+        assert!(
+            ini.contains("\nextension=mysqli\n"),
+            "mysqli must be enabled for phpMyAdmin"
+        );
+        assert!(
+            ini.contains("\nextension=openssl\n"),
+            "openssl must be enabled for phpMyAdmin cookie auth"
+        );
+        assert!(
+            ini.contains("\nextension=mbstring\n"),
+            "mbstring must be enabled for phpMyAdmin"
+        );
+    }
+
+    #[test]
+    fn output_buffering_is_off() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let ini = generate_php_ini(&cfg);
+        assert!(
+            ini.contains("\noutput_buffering = Off\n"),
+            "output_buffering must be Off — numeric values cause blank pages in phpMyAdmin"
+        );
     }
 
     #[test]

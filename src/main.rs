@@ -91,7 +91,7 @@ fn main() {
 
     // 5. Generate php.ini if missing (PHP-CGI is optional — missing binary is not fatal)
     if let Err(e) = php_conf::ensure_php_dirs(&config) {
-        log::warn!("cannot create php/logs dir: {e}");
+        log::warn!("cannot create logs dir: {e}");
     }
     if let Err(e) = php_conf::ensure_php_ini(&config) {
         log::warn!("cannot generate php.ini: {e}");
@@ -310,11 +310,9 @@ fn main() {
 fn create_runtime_dirs(cfg: &crate::state::RampConfig) -> Result<(), String> {
     let dirs = [
         cfg.install_dir.join("logs"),
-        cfg.install_dir.join("apache").join("logs"),
+        cfg.install_dir.join("tmp").join("sessions"),
         cfg.install_dir.join("apache").join("conf"),
-        cfg.install_dir.join("mysql").join("logs"),
         cfg.mysql.data_dir.clone(),
-        cfg.install_dir.join("php").join("logs"),
     ];
     for dir in &dirs {
         std::fs::create_dir_all(dir)
