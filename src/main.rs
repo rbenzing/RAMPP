@@ -148,6 +148,41 @@ fn main() {
             }
         } else if persisted.phpmyadmin_enabled && phpmyadmin_dir_exists {
             app_state.phpmyadmin_enabled = true;
+            // Ensure config.inc.php exists or is regenerated if RAMP-owned. Without
+            // it, phpMyAdmin falls back to built-in defaults (no AllowNoPassword)
+            // and rejects login with "Login without a password is forbidden".
+            let config_inc = phpmyadmin_dir.join("config.inc.php");
+            let should_write =
+                !config_inc.exists() || phpmyadmin_conf::is_ramp_owned_config(&config_inc);
+            if should_write {
+                let secret = persisted
+                    .phpmyadmin_blowfish_secret
+                    .clone()
+                    .unwrap_or_else(|| {
+                        phpmyadmin_conf::generate_blowfish_secret(&config.install_dir)
+                    });
+                let content = phpmyadmin_conf::generate_config_inc_php(
+                    config.mysql.port,
+                    &config.phpmyadmin.mysql_user,
+                    &config.phpmyadmin.mysql_password,
+                    &secret,
+                );
+                if let Err(e) = config::atomic_write(&config_inc, content.as_bytes()) {
+                    log::error!("Failed to write phpMyAdmin config.inc.php: {e}");
+                } else if persisted.phpmyadmin_blowfish_secret.is_none() {
+                    // Persist the freshly-generated secret so subsequent runs reuse it
+                    let state_path = install_dir.join("ramp.state");
+                    let p = PersistedState {
+                        phpmyadmin_blowfish_secret: Some(secret),
+                        ..persisted.clone()
+                    };
+                    if let Ok(data) = serde_json::to_vec_pretty(&p) {
+                        if let Err(e) = config::atomic_write(&state_path, &data) {
+                            log::error!("Failed to persist phpMyAdmin blowfish secret: {e}");
+                        }
+                    }
+                }
+            }
             if let Err(e) =
                 phpmyadmin_conf::write_phpmyadmin_apache_conf_enabled(&config, config.php.port)
             {
