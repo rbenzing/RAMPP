@@ -53,6 +53,9 @@ pub enum Event {
     TogglePhpMyAdmin,
     PhpMyAdminToggled(bool),
     OpenPhpMyAdmin,
+
+    // Diagnostics — emitted by background threads to surface log output
+    DiagnosticLog(String),
 }
 
 /// Side effects produced by the reducer. Executed by the executor AFTER state mutation.

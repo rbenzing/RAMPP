@@ -369,6 +369,11 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             )));
         }
 
+        // ── Diagnostic log lines from background threads ──────────────────────
+        Event::DiagnosticLog(msg) => {
+            effects.push(SideEffect::LogEvent(msg));
+        }
+
         // ── Shutdown all ─────────────────────────────────────────────────────
         Event::ShutdownAll => {
             for svc in [Service::Apache, Service::Mysql, Service::Php] {

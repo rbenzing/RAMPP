@@ -30,11 +30,18 @@ Alias /phpmyadmin "{pma_dir_s}"
 }
 
 pub fn generate_config_inc_php(
+    install_dir: &std::path::Path,
     mysql_port: u16,
     mysql_user: &str,
     mysql_password: &str,
     blowfish_secret: &str,
 ) -> String {
+    let temp_dir = install_dir
+        .join("logs")
+        .join("phpmyadmin")
+        .display()
+        .to_string()
+        .replace('\\', "/");
     format!(
         r#"<?php
 // RAMP — generated config.inc.php (do not remove this line — RAMP uses it to detect generated configs)
@@ -47,6 +54,7 @@ $cfg['Servers'][1]['password'] = '{mysql_password}';
 $cfg['Servers'][1]['AllowNoPassword'] = true;
 $cfg['UploadDir'] = '';
 $cfg['SaveDir'] = '';
+$cfg['TempDir'] = '{temp_dir}';
 "#
     )
 }
@@ -195,14 +203,27 @@ mod tests {
 
     #[test]
     fn config_inc_php_contains_marker() {
-        let php = generate_config_inc_php(3306, "root", "", "secret12345678901234567890123456");
+        let tmp = TempDir::new().unwrap();
+        let php = generate_config_inc_php(
+            tmp.path(),
+            3306,
+            "root",
+            "",
+            "secret12345678901234567890123456",
+        );
         assert!(php.contains("RAMP — generated config.inc.php"));
     }
 
     #[test]
     fn config_inc_php_contains_credentials() {
-        let php =
-            generate_config_inc_php(3306, "admin", "pass123", "secret12345678901234567890123456");
+        let tmp = TempDir::new().unwrap();
+        let php = generate_config_inc_php(
+            tmp.path(),
+            3306,
+            "admin",
+            "pass123",
+            "secret12345678901234567890123456",
+        );
         assert!(php.contains("'admin'"));
         assert!(php.contains("'pass123'"));
         assert!(php.contains("3306"));
@@ -210,9 +231,30 @@ mod tests {
 
     #[test]
     fn config_inc_php_contains_blowfish_secret() {
+        let tmp = TempDir::new().unwrap();
         let secret = "abcdefghij1234567890abcdefghij12";
-        let php = generate_config_inc_php(3306, "root", "", secret);
+        let php = generate_config_inc_php(tmp.path(), 3306, "root", "", secret);
         assert!(php.contains(secret));
+    }
+
+    #[test]
+    fn config_inc_php_sets_temp_dir_to_logs_phpmyadmin() {
+        let tmp = TempDir::new().unwrap();
+        let php = generate_config_inc_php(
+            tmp.path(),
+            3306,
+            "root",
+            "",
+            "secret12345678901234567890123456",
+        );
+        assert!(
+            php.contains("logs/phpmyadmin"),
+            "TempDir must point to logs/phpmyadmin"
+        );
+        assert!(
+            php.contains("$cfg['TempDir']"),
+            "TempDir must be set in config.inc.php"
+        );
     }
 
     #[test]

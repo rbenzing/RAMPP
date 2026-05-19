@@ -172,7 +172,9 @@ pub fn ensure_php_ini(cfg: &RampConfig) -> Result<(), String> {
 /// Ensure the root logs directory exists (used by PHP, Apache, and MySQL).
 pub fn ensure_php_dirs(cfg: &RampConfig) -> Result<(), String> {
     let logs_dir = cfg.install_dir.join("logs");
-    std::fs::create_dir_all(&logs_dir).map_err(|e| format!("cannot create logs: {e}"))
+    std::fs::create_dir_all(&logs_dir).map_err(|e| format!("cannot create logs: {e}"))?;
+    let pma_logs = logs_dir.join("phpmyadmin");
+    std::fs::create_dir_all(&pma_logs).map_err(|e| format!("cannot create logs/phpmyadmin: {e}"))
 }
 
 #[cfg(test)]

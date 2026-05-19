@@ -156,7 +156,12 @@ impl Executor {
         match spawn_service(svc, &self.config, chosen, self.tx.clone()) {
             Ok(proc) => {
                 let tx = self.tx.clone();
-                let join = std::thread::spawn(move || watcher(proc, tx, kill_rx));
+                let error_log = if svc == Service::Mysql {
+                    Some(self.config.install_dir.join("logs").join("mysql_error.log"))
+                } else {
+                    None
+                };
+                let join = std::thread::spawn(move || watcher(proc, tx, kill_rx, error_log));
                 self.handles.insert(
                     svc,
                     ServiceHandles {
@@ -273,6 +278,7 @@ impl Executor {
                 let blowfish_secret = self.load_or_generate_blowfish_secret();
                 let mysql_port = self.effective_port(Service::Mysql);
                 let content = phpmyadmin_conf::generate_config_inc_php(
+                    &self.config.install_dir,
                     mysql_port,
                     &self.config.phpmyadmin.mysql_user,
                     &self.config.phpmyadmin.mysql_password,
@@ -389,7 +395,15 @@ impl Executor {
 ///
 /// Uses crossbeam select! so kill signals are acted on immediately rather than
 /// waiting for the next 100ms poll interval.
-fn watcher(proc: ServiceProcess, tx: Sender<Event>, kill_rx: crossbeam_channel::Receiver<()>) {
+///
+/// `error_log`: if provided, the tail of this file is emitted as a LogEvent on non-zero exit
+/// so crash reasons are visible without leaving the RAMP UI.
+fn watcher(
+    proc: ServiceProcess,
+    tx: Sender<Event>,
+    kill_rx: crossbeam_channel::Receiver<()>,
+    error_log: Option<std::path::PathBuf>,
+) {
     let svc = proc.service;
     let poll_interval = std::time::Duration::from_millis(100);
 
@@ -406,6 +420,15 @@ fn watcher(proc: ServiceProcess, tx: Sender<Event>, kill_rx: crossbeam_channel::
                 // Non-blocking poll: has the process exited on its own?
                 if let Some(code) = proc.try_wait() {
                     drop(proc);
+                    if code != 0 {
+                        if let Some(ref log_path) = error_log {
+                            if let Some(tail) = read_log_tail(log_path, 20) {
+                                let _ = tx.send(Event::DiagnosticLog(format!(
+                                    "{svc}: error log tail:\n{tail}"
+                                )));
+                            }
+                        }
+                    }
                     let _ = tx.send(Event::ProcessExit {
                         service: svc,
                         exit_code: Some(code),
@@ -415,4 +438,15 @@ fn watcher(proc: ServiceProcess, tx: Sender<Event>, kill_rx: crossbeam_channel::
             }
         }
     }
+}
+
+/// Read the last `max_lines` lines of a text file. Returns None if the file cannot be read.
+fn read_log_tail(path: &std::path::Path, max_lines: usize) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    if content.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    Some(lines[start..].join("\n"))
 }

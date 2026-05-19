@@ -162,6 +162,7 @@ fn main() {
                         phpmyadmin_conf::generate_blowfish_secret(&config.install_dir)
                     });
                 let content = phpmyadmin_conf::generate_config_inc_php(
+                    &config.install_dir,
                     config.mysql.port,
                     &config.phpmyadmin.mysql_user,
                     &config.phpmyadmin.mysql_password,
