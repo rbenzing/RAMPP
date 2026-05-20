@@ -292,6 +292,20 @@ fn service_row(
                 open_in_editor(config_path);
             }
 
+            // Open in browser — Apache only
+            if svc == Service::Apache {
+                let port = status.effective_port.unwrap_or(configured_port);
+                let is_running = status.state == ServiceState::Running;
+                let open_resp = ui.add_enabled(is_running, egui::Button::new("↗ Open"));
+                let clicked = open_resp.clicked();
+                if !is_running {
+                    open_resp.on_disabled_hover_text("Apache must be Running");
+                }
+                if clicked {
+                    open_in_browser(&format!("http://localhost:{port}"));
+                }
+            }
+
             // Admin controls — only on the MySQL row when show_admin is true
             if show_admin {
                 let all_up = mysql_running && php_running && apache_running;
@@ -372,5 +386,11 @@ fn format_uptime(elapsed_secs: u64) -> String {
 fn open_in_editor(path: &std::path::Path) {
     let _ = std::process::Command::new("cmd")
         .args(["/c", "start", "", &path.to_string_lossy()])
+        .spawn();
+}
+
+fn open_in_browser(url: &str) {
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
         .spawn();
 }
