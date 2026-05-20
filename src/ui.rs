@@ -137,7 +137,19 @@ impl eframe::App for RampApp {
             });
 
             ui.separator();
-            ui.label("Log");
+            ui.horizontal(|ui| {
+                ui.label("Log");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✕ Clear").clicked() {
+                        self.log.clear();
+                        let _ = self.tx.send(Event::ClearLog);
+                    }
+                    if ui.small_button("⎘ Copy").clicked() {
+                        let text = self.log.tail(100).join("\n");
+                        ctx.copy_text(text);
+                    }
+                });
+            });
 
             let lines = self.log.tail(100);
             egui::ScrollArea::vertical()

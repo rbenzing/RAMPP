@@ -68,7 +68,6 @@ impl SharedLog {
         }
     }
 
-    #[allow(dead_code)]
     pub fn clear(&self) {
         if let Ok(mut buf) = self.0.lock() {
             buf.clear();
