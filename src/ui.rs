@@ -191,11 +191,22 @@ fn service_row(
             }
         }
 
-        // Show elapsed startup time
-        if status.state == ServiceState::Starting {
-            if let Some(start) = status.started_at {
-                ui.label(format!("({}s)", start.elapsed().as_secs()));
+        match status.state {
+            ServiceState::Starting => {
+                if let Some(start) = status.started_at {
+                    ui.label(format!("({}s)", start.elapsed().as_secs()));
+                }
             }
+            ServiceState::Running => {
+                if let Some(start) = status.started_at {
+                    let secs = start.elapsed().as_secs();
+                    ui.colored_label(
+                        egui::Color32::DARK_GRAY,
+                        format!("up {}", format_uptime(secs)),
+                    );
+                }
+            }
+            _ => {}
         }
 
         // Show health degradation before the service crashes
@@ -311,5 +322,15 @@ fn state_indicator(state: ServiceState) -> egui::Color32 {
         ServiceState::Starting | ServiceState::Stopping => egui::Color32::YELLOW,
         ServiceState::Crashed | ServiceState::Error => egui::Color32::RED,
         ServiceState::Stopped => egui::Color32::GRAY,
+    }
+}
+
+fn format_uptime(elapsed_secs: u64) -> String {
+    if elapsed_secs < 60 {
+        format!("{elapsed_secs}s")
+    } else if elapsed_secs < 3600 {
+        format!("{}m {}s", elapsed_secs / 60, elapsed_secs % 60)
+    } else {
+        format!("{}h {}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
     }
 }
