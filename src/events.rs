@@ -54,6 +54,10 @@ pub enum Event {
     PhpMyAdminToggled(bool),
     OpenPhpMyAdmin,
 
+    // UI actions
+    ClearLog,
+    DismissError(Service),
+
     // Diagnostics — emitted by background threads to surface log output
     DiagnosticLog(String),
 }

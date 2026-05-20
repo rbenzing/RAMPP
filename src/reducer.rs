@@ -360,6 +360,15 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             effects.push(SideEffect::OpenPhpMyAdminBrowser);
         }
 
+        Event::ClearLog => {
+            // handled in UI — reducer has no state to change
+        }
+
+        Event::DismissError(svc) => {
+            state.service_mut(svc).last_error = None;
+            effects.push(SideEffect::LogEvent(format!("{svc} error dismissed")));
+        }
+
         Event::PhpMyAdminToggled(enabled) => {
             state.phpmyadmin_enabled = enabled;
             effects.push(SideEffect::PersistDesiredState);
