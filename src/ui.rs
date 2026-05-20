@@ -69,6 +69,7 @@ impl eframe::App for RampApp {
                 mysql_running,
                 php_running,
                 apache_running,
+                &state.config.apache.conf,
             );
             service_row(
                 ui,
@@ -82,6 +83,7 @@ impl eframe::App for RampApp {
                 mysql_running,
                 php_running,
                 apache_running,
+                &state.config.mysql.ini,
             );
             service_row(
                 ui,
@@ -95,6 +97,7 @@ impl eframe::App for RampApp {
                 mysql_running,
                 php_running,
                 apache_running,
+                &state.config.php.ini,
             );
 
             ui.separator();
@@ -183,6 +186,7 @@ fn service_row(
     mysql_running: bool,
     php_running: bool,
     apache_running: bool,
+    config_path: &std::path::Path,
 ) {
     ui.horizontal(|ui| {
         let dot_color = state_indicator(status.state);
@@ -284,6 +288,10 @@ fn service_row(
                 let _ = tx.send(Event::RestartService(svc));
             }
 
+            if ui.button("✎ Edit Config").clicked() {
+                open_in_editor(config_path);
+            }
+
             // Admin controls — only on the MySQL row when show_admin is true
             if show_admin {
                 let all_up = mysql_running && php_running && apache_running;
@@ -359,4 +367,10 @@ fn format_uptime(elapsed_secs: u64) -> String {
     } else {
         format!("{}h {}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
     }
+}
+
+fn open_in_editor(path: &std::path::Path) {
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &path.to_string_lossy()])
+        .spawn();
 }
