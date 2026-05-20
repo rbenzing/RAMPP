@@ -21,6 +21,9 @@
 - **Self-provisioning** — generates `httpd.conf`, `my.ini`, `php.ini`, and initialises the MySQL data directory on first run
 - **System tray** — lives quietly in the tray; full egui status window on demand
 - **Crash recovery** — automatic restart with exponential backoff (1 s → 2 s → 4 s → 8 s → Error)
+- **Quick access** — open localhost in the browser or jump straight to a service config file from each row
+- **Live uptime** — each running service shows elapsed uptime; startup progress shown during Starting
+- **Log tools** — copy the full log to clipboard or clear it with one click; error badges are dismissible
 
 ---
 
@@ -137,7 +140,7 @@ STATE + EVENT → NEW STATE + SIDE EFFECTS
 | Layer | File | Role |
 |---|---|---|
 | Types | `state.rs` | `AppState`, `ServiceState` machine, all constants |
-| Events | `events.rs` | `Event` enum (11 variants) + `SideEffect` enum |
+| Events | `events.rs` | `Event` enum (13 variants) + `SideEffect` enum |
 | Logic | `reducer.rs` | Pure function — no I/O, fully unit-tested |
 | I/O | `executor.rs` | Translates `SideEffect`s into process ops and threads |
 | Processes | `process.rs` | Windows Job Object spawn/kill |

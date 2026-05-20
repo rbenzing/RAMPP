@@ -1,7 +1,5 @@
 # AGENTS.md
 
-Drop-in operating instructions for coding agents. Read this file before every task.
-
 **Working code only. Finish the job. Plausibility is not correctness.**
 
 ---

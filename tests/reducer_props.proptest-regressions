@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 7c5f8e0db3c385f920a02d44f131e325dee1385e532191bdcd265f1b2f159962 # shrinks to events = [RestartService(Apache), ShutdownAll]
+cc 747b0ceca770147bf10d2007918c89c5a01ffe3b8e04995edfce43f78f4004c9 # shrinks to events = [RestartService(Php), ProcessReady(Php)]
+cc 19dce2c48dfdb8fd1762b4aeace48a5b68f80f59219b6eb85464a1701d97759c # shrinks to apache = Stopped, mysql = Starting, php = Stopped, event = ProcessReady(Apache)
