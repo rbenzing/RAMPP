@@ -1299,4 +1299,21 @@ mod tests {
                 .any(|e| matches!(e, SideEffect::SpawnService(_))));
         }
     }
+
+    // ── DismissError ──────────────────────────────────────────────────────
+
+    #[test]
+    fn dismiss_error_clears_last_error() {
+        let mut state = make_state();
+        state.apache.last_error = Some("something broke".into());
+        let (state, effects) = reducer(state, Event::DismissError(Service::Apache));
+        assert!(
+            state.apache.last_error.is_none(),
+            "last_error must be cleared after DismissError"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, SideEffect::LogEvent(_))),
+            "should emit a log event"
+        );
+    }
 }

@@ -238,12 +238,26 @@ fn service_row(
                 let short = truncate_error(err);
                 ui.colored_label(egui::Color32::RED, format!("⚠ {short}"))
                     .on_hover_text(err.as_str());
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Dismiss error")
+                    .clicked()
+                {
+                    let _ = tx.send(Event::DismissError(svc));
+                }
             }
             ui.colored_label(egui::Color32::GRAY, "(click ▶ to retry)");
         } else if let Some(err) = &status.last_error {
             let short = truncate_error(err);
             ui.colored_label(egui::Color32::RED, format!("⚠ {short}"))
                 .on_hover_text(err.as_str());
+            if ui
+                .small_button("✕")
+                .on_hover_text("Dismiss error")
+                .clicked()
+            {
+                let _ = tx.send(Event::DismissError(svc));
+            }
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
