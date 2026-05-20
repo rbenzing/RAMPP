@@ -143,7 +143,9 @@ impl eframe::App for RampApp {
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .max_height(300.0)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
                     for line in &lines {
                         ui.monospace(line);
                     }
