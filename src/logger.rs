@@ -33,7 +33,6 @@ impl RingBuffer {
         self.buf.iter().map(|s| s.as_str()).collect()
     }
 
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.buf.clear();
     }
@@ -68,7 +67,6 @@ impl SharedLog {
         }
     }
 
-    #[allow(dead_code)]
     pub fn clear(&self) {
         if let Ok(mut buf) = self.0.lock() {
             buf.clear();
