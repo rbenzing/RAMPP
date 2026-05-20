@@ -32,6 +32,11 @@ impl RingBuffer {
     pub fn all(&self) -> Vec<&str> {
         self.buf.iter().map(|s| s.as_str()).collect()
     }
+
+    #[allow(dead_code)]
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
 }
 
 /// Thread-safe shared log buffer.
@@ -60,6 +65,13 @@ impl SharedLog {
             buf.tail(n).into_iter().map(|s| s.to_owned()).collect()
         } else {
             vec![]
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn clear(&self) {
+        if let Ok(mut buf) = self.0.lock() {
+            buf.clear();
         }
     }
 }
@@ -117,5 +129,15 @@ mod tests {
     fn shared_log_tail_on_empty_returns_empty() {
         let log = SharedLog::new();
         assert!(log.tail(10).is_empty());
+    }
+
+    #[test]
+    fn clear_empties_the_log() {
+        let log = SharedLog::new();
+        log.push("line 1".to_string());
+        log.push("line 2".to_string());
+        assert_eq!(log.tail(10).len(), 2);
+        log.clear();
+        assert_eq!(log.tail(10).len(), 0, "log must be empty after clear()");
     }
 }
