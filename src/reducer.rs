@@ -111,7 +111,6 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                 state.service_mut(svc).state = ServiceState::Running;
                 state.service_mut(svc).retry_count = 0;
                 state.service_mut(svc).health_fail_streak = 0;
-                state.clear_started_at(svc);
                 effects.push(SideEffect::LogEvent(format!("{svc}: ready")));
                 // Open the browser once Apache is ready after a phpMyAdmin toggle-on.
                 // Doing it here (not at toggle time) ensures we use the correct port
@@ -979,7 +978,7 @@ mod tests {
     // ── started_at invariant ──────────────────────────────────────────────
 
     #[test]
-    fn started_at_set_on_starting_cleared_on_running() {
+    fn started_at_set_on_starting_survives_through_running() {
         let state = make_state();
         let (state, _) = reducer(state, Event::StartService(Service::Apache));
         assert!(
@@ -988,8 +987,39 @@ mod tests {
         );
         let (state, _) = reducer(state, Event::ProcessReady(Service::Apache));
         assert!(
+            state.apache.started_at.is_some(),
+            "started_at must survive transition to Running"
+        );
+    }
+
+    #[test]
+    fn started_at_survives_running_transition() {
+        let state = make_state();
+        // Transition to Starting
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        assert!(
+            state.apache.started_at.is_some(),
+            "started_at must be set on Starting"
+        );
+        // Simulate ProcessReady — should move to Running without clearing started_at
+        let (state, _) = reducer(state, Event::ProcessReady(Service::Apache));
+        assert!(
+            state.apache.started_at.is_some(),
+            "started_at must survive Running transition"
+        );
+        // Simulate stop — now it should clear
+        let (state, _) = reducer(state, Event::StopService(Service::Apache));
+        // Transition through Stopping → Stopped via ProcessExit
+        let (state, _) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Apache,
+                exit_code: Some(0),
+            },
+        );
+        assert!(
             state.apache.started_at.is_none(),
-            "started_at must be cleared when Running"
+            "started_at must clear on Stopped"
         );
     }
 

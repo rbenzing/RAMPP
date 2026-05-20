@@ -109,12 +109,25 @@ fn check_invariants(state: &AppState) {
             "{svc} retry_count {} exceeds MAX_RETRIES {MAX_RETRIES}",
             s.retry_count
         );
-        // started_at must only be Some when Starting
+        // started_at must only be Some when in Starting or Running state.
+        // Conversely: when state is Stopped/Stopping/Crashed/Error, started_at must be None.
         if s.started_at.is_some() {
-            assert_eq!(
-                s.state,
-                ServiceState::Starting,
-                "{svc}: started_at is Some but state is {:?}",
+            assert!(
+                matches!(s.state, ServiceState::Starting | ServiceState::Running),
+                "{svc}: started_at is Some but state is {:?} (must be Starting or Running)",
+                s.state
+            );
+        }
+        if matches!(
+            s.state,
+            ServiceState::Stopped
+                | ServiceState::Stopping
+                | ServiceState::Crashed
+                | ServiceState::Error
+        ) {
+            assert!(
+                s.started_at.is_none(),
+                "{svc}: state is {:?} (terminal) but started_at is Some (must be None)",
                 s.state
             );
         }
