@@ -80,8 +80,8 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}"
-          $src = "target\release\ramp.exe"
-          $dst = "ramp-${version}-windows-x64.exe"
+          $src = "target\release\rampp.exe"
+          $dst = "rampp-${version}-windows-x64.exe"
           Copy-Item $src $dst
           Write-Host "Created: $dst"
 
@@ -89,7 +89,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}"
-          $file = "ramp-${version}-windows-x64.exe"
+          $file = "rampp-${version}-windows-x64.exe"
           $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
           "$hash  $file" | Out-File -Encoding ascii "${file}.sha256"
           Write-Host "SHA256: $hash"
@@ -97,25 +97,25 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "RAMP ${{ github.ref_name }}"
+          name: "RAMPP ${{ github.ref_name }}"
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           body: |
             ## Installation
 
-            1. Download `ramp-${{ github.ref_name }}-windows-x64.exe` and place it at `C:\ramp\ramp.exe`
-            2. Extract [Apache 2.4 (Win64, VS17)](https://www.apachelounge.com/download/) into `C:\ramp\apache\`
-            3. Extract [MySQL 9.x (ZIP)](https://dev.mysql.com/downloads/mysql/) into `C:\ramp\mysql\`
+            1. Download `rampp-${{ github.ref_name }}-windows-x64.exe` and place it at `C:\rampp\rampp.exe`
+            2. Extract [Apache 2.4 (Win64, VS17)](https://www.apachelounge.com/download/) into `C:\rampp\apache\`
+            3. Extract [MySQL 9.x (ZIP)](https://dev.mysql.com/downloads/mysql/) into `C:\rampp\mysql\`
             4. Install [Visual C++ Redistributable 2022 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-            5. Run `ramp.exe` — first-launch provisioning is automatic
+            5. Run `rampp.exe` — first-launch provisioning is automatic
 
             Verify the download with the `.sha256` file:
             ```powershell
-            Get-FileHash ramp-${{ github.ref_name }}-windows-x64.exe -Algorithm SHA256
+            Get-FileHash rampp-${{ github.ref_name }}-windows-x64.exe -Algorithm SHA256
             ```
 
             See [README](https://github.com/${{ github.repository }}/blob/master/README.md) for full documentation.
           files: |
-            ramp-${{ github.ref_name }}-windows-x64.exe
-            ramp-${{ github.ref_name }}-windows-x64.exe.sha256
+            rampp-${{ github.ref_name }}-windows-x64.exe
+            rampp-${{ github.ref_name }}-windows-x64.exe.sha256
