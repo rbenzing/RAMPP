@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-RAMP is a **Rust-based Windows x86-64 local development stack manager** (Apache + MySQL + PHP). Implementation is complete. Read `BRIEF.md`, and `AGENTS.md` before making changes.
+RAMPP is a **Rust-based Windows x86-64 local development stack manager** (Apache + MySQL + PHP). Implementation is complete. Read `BRIEF.md`, and `AGENTS.md` before making changes.
 
 ## Commands
 
