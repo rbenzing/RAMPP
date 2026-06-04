@@ -1,8 +1,8 @@
-# RAMP — PROJECT BRIEF (v2 — Hardened)
+# RAMPP — PROJECT BRIEF (v2 — Hardened)
 
 ## Vision
 
-RAMP is a deterministic, Rust-based local development stack manager for Windows x86-64 that orchestrates Apache, MySQL, and PHP through a formally defined state machine and event-driven execution model.
+RAMPP is a deterministic, Rust-based local development stack manager for Windows x86-64 that orchestrates Apache, MySQL, and PHP through a formally defined state machine and event-driven execution model.
 
 It is designed to be:
 
@@ -31,7 +31,7 @@ Existing AMP stacks fail in three critical engineering areas:
 2. Unsafe process handling (zombie processes, orphaned children)
 3. Weak configuration integrity (partial writes, silent corruption)
 
-RAMP solves these by:
+RAMPP solves these by:
 
 * Centralized event loop
 * Strict state machine enforcement
@@ -61,11 +61,11 @@ RAMP solves these by:
 
 ---
 
-# RAMP — ARCHITECTURE SPECIFICATION (v2 — Deterministic + Concurrent-Safe)
+# RAMPP — ARCHITECTURE SPECIFICATION (v2 — Deterministic + Concurrent-Safe)
 
 ## 1. Execution Model
 
-RAMP operates on a single authoritative event loop.
+RAMPP operates on a single authoritative event loop.
 
 All mutations occur ONLY inside the reducer.
 
@@ -255,7 +255,7 @@ On startup:
 
 ---
 
-# RAMP — PROJECT SPECIFICATION (v2 — Hardened)
+# RAMPP — PROJECT SPECIFICATION (v2 — Hardened)
 
 ## 1. Event System (Strict)
 
@@ -330,7 +330,7 @@ Installer MUST:
 
 ---
 
-# RAMP — TDD & VERIFICATION STRATEGY (v2 — Production-Grade)
+# RAMPP — TDD & VERIFICATION STRATEGY (v2 — Production-Grade)
 
 ## 1. Testing Philosophy
 
