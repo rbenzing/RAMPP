@@ -1,12 +1,12 @@
-# RAMP
+# RAMPP
 
-[![Build](https://github.com/rbenzing/RAMP/actions/workflows/release.yml/badge.svg)](https://github.com/rbenzing/RAMP/actions/workflows/release.yml)
+[![Build](https://github.com/rbenzing/RAMPP/actions/workflows/release.yml/badge.svg)](https://github.com/rbenzing/RAMPP/actions/workflows/release.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)](https://github.com/rbenzing/RAMP/releases)
-[![Release](https://img.shields.io/github/v/release/rbenzing/RAMP)](https://github.com/rbenzing/RAMP/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)](https://github.com/rbenzing/RAMPP/releases)
+[![Release](https://img.shields.io/github/v/release/rbenzing/RAMPP)](https://github.com/rbenzing/RAMPP/releases/latest)
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange)](https://www.rust-lang.org)
 
-**RAMP** is a deterministic local development stack manager for Windows x64. It orchestrates Apache, MySQL, and PHP through a formally defined state machine — no race conditions, no orphaned processes, no partial config writes.
+**RAMPP** is a deterministic local development stack manager for Windows x64. It orchestrates Apache, MySQL, and PHP through a formally defined state machine — no race conditions, no orphaned processes, no partial config writes.
 
 > Replace XAMPP or Laragon with something you can read, audit, and trust.
 
@@ -15,7 +15,7 @@
 ## Features
 
 - **Deterministic** — every state transition is explicit: `STATE + EVENT → NEW STATE + SIDE EFFECTS`
-- **Safe** — every service runs inside a Windows Job Object; killing RAMP kills the entire process tree, no zombies
+- **Safe** — every service runs inside a Windows Job Object; killing RAMPP kills the entire process tree, no zombies
 - **Observable** — all transitions logged; events are replayable for debugging
 - **Fast** — sub-second UI, Apache ready in ≤ 3 s, MySQL ready in ≤ 5 s
 - **Self-provisioning** — generates `httpd.conf`, `my.ini`, `php.ini`, and initialises the MySQL data directory on first run
@@ -43,10 +43,10 @@
 
 ### 1. Download the release binary
 
-Grab `ramp.exe` from the [latest release](https://github.com/rbenzing/RAMP/releases/latest) and place it at:
+Grab `rampp.exe` from the [latest release](https://github.com/rbenzing/RAMPP/releases/latest) and place it at:
 
 ```
-C:\ramp\ramp.exe
+C:\rampp\rampp.exe
 ```
 
 ### 2. Extract Apache and MySQL
@@ -54,26 +54,26 @@ C:\ramp\ramp.exe
 Extract the Apache ZIP so that `httpd.exe` ends up at:
 
 ```
-C:\ramp\apache\bin\httpd.exe
+C:\rampp\apache\bin\httpd.exe
 ```
 
 Extract the MySQL ZIP so that `mysqld.exe` ends up at:
 
 ```
-C:\ramp\mysql\bin\mysqld.exe
+C:\rampp\mysql\bin\mysqld.exe
 ```
 
 Extract the PHP ZIP so that `php-cgi.exe` ends up at:
 
 ```
-C:\ramp\php\php-cgi.exe
+C:\rampp\php\php-cgi.exe
 ```
 
 The final layout should look like:
 
 ```
-C:\ramp\
-  ramp.exe
+C:\rampp\
+  rampp.exe
   apache\
     bin\httpd.exe
     modules\
@@ -93,9 +93,9 @@ C:\ramp\
 
 Run `vc_redist.x64.exe` if you haven't already.
 
-### 4. Run RAMP
+### 4. Run RAMPP
 
-Double-click `ramp.exe`. On first launch RAMP will:
+Double-click `rampp.exe`. On first launch RAMPP will:
 
 1. Generate `ramp.toml` (ports 80 + 3306 + 9000)
 2. Create `apache\conf\httpd.conf`, `apache\htdocs\index.php`, `mysql\my.ini`, `php\php.ini`
@@ -108,10 +108,10 @@ Click **Start All** to bring up all three services. Apache will be at `http://12
 
 ## Configuration
 
-Edit `C:\ramp\ramp.toml` to change ports:
+Edit `C:\rampp\ramp.toml` to change ports:
 
 ```toml
-install_dir = "C:\\ramp"
+install_dir = "C:\\rampp"
 
 [apache]
 port = 80
@@ -123,7 +123,7 @@ port = 3306
 port = 9000
 ```
 
-RAMP validates the entire file before accepting it — an invalid config is rejected completely and the last valid config is preserved. After editing, restart the affected service from the UI.
+RAMPP validates the entire file before accepting it — an invalid config is rejected completely and the last valid config is preserved. After editing, restart the affected service from the UI.
 
 > `httpd.conf`, `my.ini`, and `php.ini` are generated once and never overwritten — edit them freely for custom virtual hosts, extensions, etc.
 
@@ -131,7 +131,7 @@ RAMP validates the entire file before accepting it — an invalid config is reje
 
 ## Architecture
 
-RAMP is a single binary built around a pure reducer:
+RAMPP is a single binary built around a pure reducer:
 
 ```
 STATE + EVENT → NEW STATE + SIDE EFFECTS
@@ -197,10 +197,10 @@ Three consecutive failures trigger `HEALTH_CHECK_FAIL`, which kills the service 
 
 ```bash
 # Prerequisites: Rust stable toolchain (rustup.rs), MSVC build tools
-git clone https://github.com/rbenzing/ramp.git
-cd ramp
+git clone https://github.com/rbenzing/RAMPP.git
+cd rampp
 cargo build --release
-# Binary at target\release\ramp.exe
+# Binary at target\release\rampp.exe
 ```
 
 Run the test suite:
@@ -226,4 +226,4 @@ cargo fmt -- --check
 
 ## License
 
-RAMP is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License v3.0](LICENSE).
+RAMPP is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License v3.0](LICENSE).
