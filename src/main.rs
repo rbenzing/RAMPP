@@ -65,8 +65,8 @@ fn main() {
     if let Err(e) = apache_conf::ensure_httpd_conf(&config) {
         log::warn!("cannot generate httpd.conf: {e}");
     }
-    if let Err(e) = apache_conf::ensure_htdocs(&config) {
-        log::warn!("cannot create htdocs: {e}");
+    if let Err(e) = apache_conf::ensure_document_root(&config) {
+        log::warn!("cannot create document root: {e}");
     }
 
     // 3. Generate my.ini if missing

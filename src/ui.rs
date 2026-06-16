@@ -141,6 +141,28 @@ impl eframe::App for RampApp {
 
             ui.separator();
             ui.horizontal(|ui| {
+                ui.label("Document Root:");
+                ui.monospace(state.config.apache.document_root.display().to_string());
+                if ui.button("📁 Change…").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new()
+                        .set_title("Select Apache Document Root")
+                        .pick_folder()
+                    {
+                        match crate::paths::validate_document_root(&folder) {
+                            Ok(()) => {
+                                let _ = self.tx.send(Event::SetDocumentRoot(folder));
+                            }
+                            Err(e) => {
+                                log::error!("invalid document root: {e}");
+                                self.log.push(format!("ERROR: invalid document root — {e}"));
+                            }
+                        }
+                    }
+                }
+            });
+
+            ui.separator();
+            ui.horizontal(|ui| {
                 ui.label("Log");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("✕ Clear").clicked() {

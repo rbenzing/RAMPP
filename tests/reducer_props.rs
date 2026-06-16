@@ -5,9 +5,9 @@
 ///
 /// Run with: cargo test --test reducer_props
 use proptest::prelude::*;
-use ramp::events::{Event, SideEffect};
-use ramp::reducer::reducer;
-use ramp::state::{
+use rampp::events::{Event, SideEffect};
+use rampp::reducer::reducer;
+use rampp::state::{
     ApacheConfig, AppState, DesiredServiceState, MysqlConfig, PhpConfig, PhpMyAdminConfig,
     RampConfig, Service, ServiceState, MAX_RETRIES,
 };
@@ -22,6 +22,7 @@ fn make_base_state() -> AppState {
             port: 8080,
             bin: PathBuf::from("C:\\ramp\\apache\\bin\\httpd.exe"),
             conf: PathBuf::from("C:\\ramp\\apache\\conf\\httpd.conf"),
+            document_root: PathBuf::from("C:\\ramp\\apache\\htdocs"),
         },
         mysql: MysqlConfig {
             port: 3306,

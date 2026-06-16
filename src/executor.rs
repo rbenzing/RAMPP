@@ -70,6 +70,7 @@ impl Executor {
                     self.log.push(msg);
                 }
                 SideEffect::PersistDesiredState => self.do_persist(state),
+                SideEffect::PersistConfig => self.do_persist_config(state),
                 SideEffect::TogglePhpMyAdmin(enable) => self.do_toggle_phpmyadmin(enable, state),
                 SideEffect::OpenPhpMyAdminBrowser => self.do_open_phpmyadmin_browser(),
             }
@@ -251,6 +252,28 @@ impl Executor {
                 format!("ERROR: state persist failed — restart may not restore services: {e}");
             self.log.push(msg);
         }
+    }
+
+    fn do_persist_config(&mut self, state: &AppState) {
+        // Refresh the executor's config copy so a subsequent respawn regenerates
+        // httpd.conf with the new document root. The executor otherwise keeps the
+        // config it was constructed with.
+        self.config = state.config.clone();
+
+        if let Err(e) = crate::config::write_config(&self.config) {
+            log::error!("config persist failed: {e}");
+            self.log.push(format!("ERROR: config persist failed — {e}"));
+            return;
+        }
+        // Ensure the new document root exists (seed index.php only if empty).
+        if let Err(e) = crate::apache_conf::ensure_document_root(&self.config) {
+            self.log
+                .push(format!("warn: could not prepare document root — {e}"));
+        }
+        self.log.push(format!(
+            "document root saved: {}",
+            self.config.apache.document_root.display()
+        ));
     }
 
     fn do_toggle_phpmyadmin(&mut self, enable: bool, state: &AppState) {

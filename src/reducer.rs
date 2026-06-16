@@ -368,6 +368,31 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             effects.push(SideEffect::LogEvent(format!("{svc} error dismissed")));
         }
 
+        Event::SetDocumentRoot(path) => {
+            state.config.apache.document_root = path;
+            effects.push(SideEffect::PersistConfig);
+            effects.push(SideEffect::LogEvent(format!(
+                "document root set to {}",
+                state.config.apache.document_root.display()
+            )));
+            // Apache reads DocumentRoot only at startup. If it's running, restart it so
+            // the change goes live; otherwise it applies on next start. Mirrors the
+            // RestartService(Apache) Running/Starting branch.
+            match state.apache.state {
+                ServiceState::Running | ServiceState::Starting => {
+                    state.apache.state = ServiceState::Stopping;
+                    state.clear_started_at(Service::Apache);
+                    state.apache.desired = DesiredServiceState::Running;
+                    effects.push(SideEffect::StopHealthCheck(Service::Apache));
+                    effects.push(SideEffect::KillService(Service::Apache));
+                    effects.push(SideEffect::LogEvent(
+                        "Apache: restarting to apply new document root".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
         Event::PhpMyAdminToggled(enabled) => {
             state.phpmyadmin_enabled = enabled;
             effects.push(SideEffect::PersistDesiredState);
@@ -424,6 +449,7 @@ mod tests {
                 port: 80,
                 bin: std::path::PathBuf::from("C:\\ramp\\apache\\bin\\httpd.exe"),
                 conf: std::path::PathBuf::from("C:\\ramp\\apache\\conf\\httpd.conf"),
+                document_root: std::path::PathBuf::from("C:\\ramp\\apache\\htdocs"),
             },
             mysql: MysqlConfig {
                 port: 3306,
@@ -1315,5 +1341,39 @@ mod tests {
             effects.iter().any(|e| matches!(e, SideEffect::LogEvent(_))),
             "should emit a log event"
         );
+    }
+
+    // ── SetDocumentRoot ───────────────────────────────────────────────────
+
+    #[test]
+    fn set_document_root_persists_and_restarts_when_apache_running() {
+        let mut state = make_state();
+        set_state(&mut state, Service::Apache, ServiceState::Running);
+        let new_root = std::path::PathBuf::from("C:\\sites\\myapp");
+        let (new_state, effects) = reducer(state, Event::SetDocumentRoot(new_root.clone()));
+        assert_eq!(new_state.config.apache.document_root, new_root);
+        assert_eq!(new_state.apache.state, ServiceState::Stopping);
+        assert_eq!(new_state.apache.desired, DesiredServiceState::Running);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::PersistConfig)));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::KillService(Service::Apache))));
+    }
+
+    #[test]
+    fn set_document_root_persist_only_when_apache_stopped() {
+        let state = make_state(); // apache Stopped
+        let new_root = std::path::PathBuf::from("C:\\sites\\other");
+        let (new_state, effects) = reducer(state, Event::SetDocumentRoot(new_root.clone()));
+        assert_eq!(new_state.config.apache.document_root, new_root);
+        assert_eq!(new_state.apache.state, ServiceState::Stopped);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::PersistConfig)));
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::KillService(Service::Apache))));
     }
 }

@@ -19,6 +19,8 @@ struct TomlRoot {
 #[derive(Debug, Serialize, Deserialize)]
 struct TomlApache {
     port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    document_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +98,30 @@ port = 9000
     atomic_write(&paths.config, default.as_bytes())
 }
 
+/// Serialize the current config back to ramp.toml (atomic write). Preserves all
+/// known fields (ports, phpMyAdmin credentials) and writes the document_root.
+pub fn write_config(cfg: &RampConfig) -> Result<(), String> {
+    let paths = InstallPaths::from_install_dir(&cfg.install_dir)?;
+    let doc = TomlRoot {
+        install_dir: cfg.install_dir.clone(),
+        apache: TomlApache {
+            port: cfg.apache.port,
+            document_root: Some(cfg.apache.document_root.clone()),
+        },
+        mysql: TomlMysql {
+            port: cfg.mysql.port,
+        },
+        php: TomlPhp { port: cfg.php.port },
+        phpmyadmin: TomlPhpMyAdmin {
+            mysql_user: cfg.phpmyadmin.mysql_user.clone(),
+            mysql_password: cfg.phpmyadmin.mysql_password.clone(),
+        },
+    };
+    let serialized =
+        toml::to_string_pretty(&doc).map_err(|e| format!("serialize config failed: {e}"))?;
+    atomic_write(&paths.config, serialized.as_bytes())
+}
+
 fn validate_and_build(doc: TomlRoot, install_dir: &Path) -> Result<RampConfig, String> {
     let paths = InstallPaths::from_install_dir(install_dir)?;
 
@@ -123,12 +149,22 @@ fn validate_and_build(doc: TomlRoot, install_dir: &Path) -> Result<RampConfig, S
         return Err("mysql.port and php.port must be different".into());
     }
 
+    let document_root = match &doc.apache.document_root {
+        Some(p) => {
+            crate::paths::validate_document_root(p)
+                .map_err(|e| format!("invalid apache.document_root: {e}"))?;
+            p.clone()
+        }
+        None => install_dir.join("apache").join("htdocs"),
+    };
+
     Ok(RampConfig {
         install_dir: install_dir.to_path_buf(),
         apache: ApacheConfig {
             port: doc.apache.port,
             bin: paths.apache_bin,
             conf: paths.apache_conf,
+            document_root,
         },
         mysql: MysqlConfig {
             port: doc.mysql.port,
@@ -456,5 +492,93 @@ mysql_password = "secret"
         let cfg = load_config(dir).unwrap();
         assert_eq!(cfg.phpmyadmin.mysql_user, "admin");
         assert_eq!(cfg.phpmyadmin.mysql_password, "secret");
+    }
+
+    #[test]
+    fn document_root_defaults_to_htdocs_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        write_toml(
+            dir,
+            &format!(
+                r#"install_dir = "{}"
+[apache]
+port = 8080
+[mysql]
+port = 3306
+[php]
+port = 9000
+"#,
+                dir.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        let cfg = load_config(dir).unwrap();
+        assert_eq!(cfg.apache.document_root, dir.join("apache").join("htdocs"));
+    }
+
+    #[test]
+    fn document_root_reads_custom_value() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let custom = dir.join("my_site");
+        std::fs::create_dir(&custom).unwrap();
+        write_toml(
+            dir,
+            &format!(
+                r#"install_dir = "{}"
+[apache]
+port = 8080
+document_root = "{}"
+[mysql]
+port = 3306
+[php]
+port = 9000
+"#,
+                dir.display().to_string().replace('\\', "\\\\"),
+                custom.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        let cfg = load_config(dir).unwrap();
+        assert_eq!(cfg.apache.document_root, custom);
+    }
+
+    #[test]
+    fn rejects_document_root_that_is_not_a_directory() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let missing = dir.join("nope");
+        write_toml(
+            dir,
+            &format!(
+                r#"install_dir = "{}"
+[apache]
+port = 8080
+document_root = "{}"
+[mysql]
+port = 3306
+[php]
+port = 9000
+"#,
+                dir.display().to_string().replace('\\', "\\\\"),
+                missing.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        assert!(load_config(dir).is_err());
+    }
+
+    #[test]
+    fn write_config_round_trips_document_root() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let custom = dir.join("site2");
+        std::fs::create_dir(&custom).unwrap();
+        write_default_config(dir).unwrap();
+        let mut cfg = load_config(dir).unwrap();
+        cfg.apache.document_root = custom.clone();
+        write_config(&cfg).unwrap();
+        let reloaded = load_config(dir).unwrap();
+        assert_eq!(reloaded.apache.document_root, custom);
+        assert_eq!(reloaded.apache.port, cfg.apache.port);
+        assert_eq!(reloaded.php.port, cfg.php.port);
     }
 }

@@ -5,9 +5,9 @@
 ///
 /// Run with: cargo test --test integration_health
 use crossbeam_channel::unbounded;
-use ramp::events::Event;
-use ramp::health::{check_mysql_ready, check_php_ready, poll_until_ready, run_health_checker};
-use ramp::state::Service;
+use rampp::events::Event;
+use rampp::health::{check_mysql_ready, check_php_ready, poll_until_ready, run_health_checker};
+use rampp::state::Service;
 use std::net::TcpListener;
 use std::time::Duration;
 
@@ -119,7 +119,7 @@ fn poll_until_ready_resolves_when_port_opens() {
 /// Uses a short artificial timeout by checking a port that will never open.
 #[test]
 fn poll_until_ready_times_out_and_sends_process_exit() {
-    use ramp::health::poll_until_ready_with_timeout;
+    use rampp::health::poll_until_ready_with_timeout;
 
     let (tx, rx) = unbounded();
     // Port with nothing listening and no thread will open it.

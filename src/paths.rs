@@ -148,6 +148,34 @@ pub fn validate_critical_path(
     Ok(())
 }
 
+/// Validate a user-chosen Apache DocumentRoot. Unlike `validate_critical_path`,
+/// the path is NOT confined to `install_dir` — the user may point anywhere on disk.
+/// Requirements: absolute, exists, is a directory, and is not a symlink (consistent
+/// with RAMPP's no-symlink-following stance).
+pub fn validate_document_root(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "document root must be absolute: {}",
+            path.display()
+        ));
+    }
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot access document root {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "symlink not allowed for document root: {}",
+            path.display()
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(format!(
+            "document root must be a directory: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +291,56 @@ mod tests {
         assert!(paths.phpmyadmin_dir.ends_with("phpmyadmin"));
         assert!(paths.phpmyadmin_config.ends_with("config.inc.php"));
         assert!(paths.phpmyadmin_apache_conf.ends_with("phpmyadmin.conf"));
+    }
+
+    #[test]
+    fn document_root_accepts_existing_dir() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        assert!(validate_document_root(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn document_root_rejects_relative() {
+        assert!(validate_document_root(Path::new("relative\\dir")).is_err());
+    }
+
+    #[test]
+    fn document_root_rejects_missing() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(validate_document_root(&missing).is_err());
+    }
+
+    #[test]
+    fn document_root_rejects_file() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("index.php");
+        std::fs::write(&file, b"<?php").unwrap();
+        let err = validate_document_root(&file).unwrap_err();
+        assert!(
+            err.contains("directory"),
+            "expected directory error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn document_root_rejects_symlink() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("real_dir");
+        std::fs::create_dir(&target).unwrap();
+        let link = tmp.path().join("link_dir");
+        // Creating directory symlinks on Windows needs privilege/Developer Mode.
+        match std::os::windows::fs::symlink_dir(&target, &link) {
+            Err(e) if e.raw_os_error() == Some(1314) => return, // ERROR_PRIVILEGE_NOT_HELD
+            Err(e) => panic!("unexpected symlink error: {e}"),
+            Ok(()) => {}
+        }
+        let result = validate_document_root(&link);
+        assert!(result.is_err(), "symlink document_root must be rejected");
+        assert!(result.unwrap_err().contains("symlink"));
     }
 }
