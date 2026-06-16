@@ -18,6 +18,7 @@ fn make_config(bin: PathBuf) -> RampConfig {
             port: 18080,
             bin,
             conf: install_dir.join("httpd.conf"),
+            document_root: install_dir.join("htdocs"),
         },
         mysql: MysqlConfig {
             port: 13306,

@@ -129,6 +129,7 @@ fn validate_and_build(doc: TomlRoot, install_dir: &Path) -> Result<RampConfig, S
             port: doc.apache.port,
             bin: paths.apache_bin,
             conf: paths.apache_conf,
+            document_root: install_dir.join("apache").join("htdocs"),
         },
         mysql: MysqlConfig {
             port: doc.mysql.port,

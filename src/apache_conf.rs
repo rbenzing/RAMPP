@@ -168,6 +168,7 @@ mod tests {
                 port: 8080,
                 bin: dir.join("apache").join("bin").join("httpd.exe"),
                 conf: dir.join("apache").join("conf").join("httpd.conf"),
+                document_root: dir.join("apache").join("htdocs"),
             },
             mysql: MysqlConfig {
                 port: 3306,

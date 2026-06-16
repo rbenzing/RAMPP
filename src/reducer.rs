@@ -424,6 +424,7 @@ mod tests {
                 port: 80,
                 bin: std::path::PathBuf::from("C:\\ramp\\apache\\bin\\httpd.exe"),
                 conf: std::path::PathBuf::from("C:\\ramp\\apache\\conf\\httpd.conf"),
+                document_root: std::path::PathBuf::from("C:\\ramp\\apache\\htdocs"),
             },
             mysql: MysqlConfig {
                 port: 3306,

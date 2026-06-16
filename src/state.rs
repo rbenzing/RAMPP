@@ -99,6 +99,7 @@ pub struct ApacheConfig {
     pub port: u16,
     pub bin: PathBuf,
     pub conf: PathBuf,
+    pub document_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
