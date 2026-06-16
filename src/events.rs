@@ -57,6 +57,8 @@ pub enum Event {
     // UI actions
     ClearLog,
     DismissError(Service),
+    /// User picked a new Apache DocumentRoot (already validated by the UI).
+    SetDocumentRoot(std::path::PathBuf),
 
     // Diagnostics — emitted by background threads to surface log output
     DiagnosticLog(String),
@@ -69,11 +71,16 @@ pub enum Event {
 pub enum SideEffect {
     SpawnService(Service),
     KillService(Service),
-    ScheduleRetry { service: Service, delay: Duration },
+    ScheduleRetry {
+        service: Service,
+        delay: Duration,
+    },
     StartReadinessCheck(Service),
     StopHealthCheck(Service),
     LogEvent(String),
     PersistDesiredState,
+    /// Refresh the executor's config copy from state and persist ramp.toml.
+    PersistConfig,
     TogglePhpMyAdmin(bool),
     OpenPhpMyAdminBrowser,
 }

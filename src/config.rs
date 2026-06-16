@@ -100,7 +100,6 @@ port = 9000
 
 /// Serialize the current config back to ramp.toml (atomic write). Preserves all
 /// known fields (ports, phpMyAdmin credentials) and writes the document_root.
-#[allow(dead_code)]
 pub fn write_config(cfg: &RampConfig) -> Result<(), String> {
     let paths = InstallPaths::from_install_dir(&cfg.install_dir)?;
     let doc = TomlRoot {
