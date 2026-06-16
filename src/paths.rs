@@ -152,7 +152,6 @@ pub fn validate_critical_path(
 /// the path is NOT confined to `install_dir` — the user may point anywhere on disk.
 /// Requirements: absolute, exists, is a directory, and is not a symlink (consistent
 /// with RAMPP's no-symlink-following stance).
-#[allow(dead_code)]
 pub fn validate_document_root(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
         return Err(format!(
