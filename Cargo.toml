@@ -20,6 +20,7 @@ ureq = "2"
 eframe = "0.27"
 egui = "0.27"
 tray-item = "0.9"
+rfd = "0.14"
 
 [dependencies.windows]
 version = "0.56"
