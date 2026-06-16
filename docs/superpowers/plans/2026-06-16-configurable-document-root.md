@@ -12,6 +12,20 @@
 
 ---
 
+## Per-Task Gate (REQUIRED before every `git commit` step)
+
+Every task that changes code MUST pass the full project gate before its commit step — do not defer linting to the end:
+
+```bash
+cargo clippy -- -D warnings && cargo fmt -- --check && cargo test
+```
+
+- If `cargo fmt -- --check` reports diffs, run `cargo fmt` and include the result in the same commit.
+- If clippy reports warnings, fix them before committing (the `-D warnings` flag makes them errors).
+- The named per-step `cargo build` / `cargo test --lib <module>` commands are for fast iteration; this gate is the authoritative check that must be green at each commit.
+
+---
+
 ## File Structure
 
 | File | Change |
