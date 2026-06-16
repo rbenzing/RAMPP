@@ -5,8 +5,8 @@
 ///
 /// Run with: cargo test --test integration_spawn
 use crossbeam_channel::unbounded;
-use ramp::process::{check_port_available, spawn_service};
-use ramp::state::{ApacheConfig, MysqlConfig, PhpConfig, PhpMyAdminConfig, RampConfig};
+use rampp::process::{check_port_available, spawn_service};
+use rampp::state::{ApacheConfig, MysqlConfig, PhpConfig, PhpMyAdminConfig, RampConfig};
 use std::path::PathBuf;
 
 /// Build a minimal RampConfig pointing apache.bin at the given binary.
@@ -57,7 +57,7 @@ fn cmd_exe_exists() {
 /// spawn_service rejects a binary that is outside install_dir.
 #[test]
 fn spawn_rejects_binary_outside_install_dir() {
-    use ramp::state::Service;
+    use rampp::state::Service;
     use tempfile::TempDir;
 
     let tmp = TempDir::new().unwrap();
@@ -80,7 +80,7 @@ fn spawn_rejects_binary_outside_install_dir() {
 
 /// Prepare a temp install_dir with cmd.exe copied inside and the apache/ work_dir created.
 /// spawn_service requires the working directory to exist.
-fn make_spawn_env() -> (tempfile::TempDir, ramp::state::RampConfig) {
+fn make_spawn_env() -> (tempfile::TempDir, rampp::state::RampConfig) {
     use tempfile::TempDir;
 
     let tmp = TempDir::new().unwrap();
@@ -105,7 +105,7 @@ fn make_spawn_env() -> (tempfile::TempDir, ramp::state::RampConfig) {
 /// Uses cmd.exe (hangs waiting for input) as a stand-in binary.
 #[test]
 fn spawn_and_kill_via_job_object() {
-    use ramp::state::Service;
+    use rampp::state::Service;
 
     let (_tmp, cfg) = make_spawn_env();
     let (tx, _rx) = unbounded();
@@ -125,7 +125,7 @@ fn spawn_and_kill_via_job_object() {
 /// is the proof that the process is dead.
 #[test]
 fn process_exits_after_kill() {
-    use ramp::state::Service;
+    use rampp::state::Service;
 
     let (_tmp, cfg) = make_spawn_env();
     let (tx, _rx) = unbounded();
@@ -173,8 +173,8 @@ fn unused_high_port_is_available() {
 /// try_wait returns u32, and Event::ProcessExit.exit_code is Option<u32>.
 #[test]
 fn exit_code_is_u32_no_sign_extension() {
-    use ramp::events::Event;
-    use ramp::state::Service;
+    use rampp::events::Event;
+    use rampp::state::Service;
 
     // Simulate what the watcher emits: a high Windows exit code
     let code: u32 = 0xC000_0005; // STATUS_ACCESS_VIOLATION
@@ -204,9 +204,9 @@ fn exit_code_is_u32_no_sign_extension() {
 #[test]
 fn kill_then_respawn_no_stale_process_exit() {
     use crossbeam_channel::unbounded;
-    use ramp::events::Event;
-    use ramp::process::spawn_service;
-    use ramp::state::Service;
+    use rampp::events::Event;
+    use rampp::process::spawn_service;
+    use rampp::state::Service;
 
     let (_tmp, cfg) = make_spawn_env();
 
@@ -250,7 +250,7 @@ fn kill_then_respawn_no_stale_process_exit() {
 /// validate_critical_path passes (it's inside install_dir) but bin.exists() must fail.
 #[test]
 fn spawn_rejects_nonexistent_binary() {
-    use ramp::state::Service;
+    use rampp::state::Service;
     use tempfile::TempDir;
 
     let tmp = TempDir::new().unwrap();
@@ -298,7 +298,7 @@ fn check_port_available_detects_conflict() {
 /// try_wait returns None for a running process and Some(code) after it exits naturally.
 #[test]
 fn try_wait_reflects_process_lifecycle() {
-    use ramp::state::Service;
+    use rampp::state::Service;
 
     let (_tmp, cfg) = make_spawn_env();
     let (tx, _rx) = unbounded();

@@ -5,9 +5,9 @@
 ///
 /// Run with: cargo test --test reducer_props
 use proptest::prelude::*;
-use ramp::events::{Event, SideEffect};
-use ramp::reducer::reducer;
-use ramp::state::{
+use rampp::events::{Event, SideEffect};
+use rampp::reducer::reducer;
+use rampp::state::{
     ApacheConfig, AppState, DesiredServiceState, MysqlConfig, PhpConfig, PhpMyAdminConfig,
     RampConfig, Service, ServiceState, MAX_RETRIES,
 };
