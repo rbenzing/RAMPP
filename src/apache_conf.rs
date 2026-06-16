@@ -13,6 +13,12 @@ pub fn generate_httpd_conf_with_ports(cfg: &RampConfig, port: u16, php_port: u16
     let apache_dir = apache_dir.display().to_string().replace('\\', "/");
     let logs_dir = cfg.install_dir.join("logs");
     let logs_dir = logs_dir.display().to_string().replace('\\', "/");
+    let doc_root = cfg
+        .apache
+        .document_root
+        .display()
+        .to_string()
+        .replace('\\', "/");
 
     format!(
         r#"# RAMP — generated httpd.conf (do not remove this line — RAMP uses it to detect generated configs)
@@ -55,8 +61,8 @@ ServerName 127.0.0.1:{port}
     Require all denied
 </Directory>
 
-DocumentRoot "{apache_dir}/htdocs"
-<Directory "{apache_dir}/htdocs">
+DocumentRoot "{doc_root}"
+<Directory "{doc_root}">
     Options Indexes FollowSymLinks
     AllowOverride All
     Require all granted
@@ -140,14 +146,19 @@ pub fn ensure_httpd_conf(cfg: &RampConfig) -> Result<(), String> {
         .map_err(|e| format!("cannot write httpd.conf: {e}"))
 }
 
-/// Ensure htdocs directory exists (Apache requires DocumentRoot to exist).
-pub fn ensure_htdocs(cfg: &RampConfig) -> Result<(), String> {
-    let htdocs = cfg.install_dir.join("apache").join("htdocs");
-    std::fs::create_dir_all(&htdocs).map_err(|e| format!("cannot create apache/htdocs: {e}"))?;
+/// Ensure the configured DocumentRoot exists. Seeds a default index.php ONLY when
+/// the folder is empty, so user-chosen project folders are never modified.
+pub fn ensure_document_root(cfg: &RampConfig) -> Result<(), String> {
+    let root = &cfg.apache.document_root;
+    std::fs::create_dir_all(root)
+        .map_err(|e| format!("cannot create document root {}: {e}", root.display()))?;
 
-    // Drop a default index.php only on first run
-    let index = htdocs.join("index.php");
-    if !index.exists() {
+    let is_empty = std::fs::read_dir(root)
+        .map_err(|e| format!("cannot read document root {}: {e}", root.display()))?
+        .next()
+        .is_none();
+    if is_empty {
+        let index = root.join("index.php");
         std::fs::write(&index, b"<?php phpinfo();\n")
             .map_err(|e| format!("cannot write index.php: {e}"))?;
     }
@@ -259,5 +270,51 @@ mod tests {
             conf.contains(r#"Include "conf/phpmyadmin.conf""#),
             "httpd.conf must include phpmyadmin.conf"
         );
+    }
+
+    #[test]
+    fn document_root_reflects_config_value() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = test_cfg(tmp.path());
+        cfg.apache.document_root = tmp.path().join("custom_site");
+        let conf = generate_httpd_conf(&cfg);
+        let expected = tmp
+            .path()
+            .join("custom_site")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        assert!(
+            conf.contains(&format!("DocumentRoot \"{expected}\"")),
+            "DocumentRoot must reflect configured document_root"
+        );
+        assert!(
+            conf.contains(&format!("<Directory \"{expected}\">")),
+            "<Directory> block must reflect configured document_root"
+        );
+    }
+
+    #[test]
+    fn ensure_document_root_seeds_empty_folder() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        ensure_document_root(&cfg).unwrap();
+        let index = cfg.apache.document_root.join("index.php");
+        assert!(
+            index.exists(),
+            "empty document root should be seeded with index.php"
+        );
+    }
+
+    #[test]
+    fn ensure_document_root_leaves_nonempty_folder_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        std::fs::create_dir_all(&cfg.apache.document_root).unwrap();
+        let existing = cfg.apache.document_root.join("app.php");
+        std::fs::write(&existing, b"<?php // user file").unwrap();
+        ensure_document_root(&cfg).unwrap();
+        assert!(!cfg.apache.document_root.join("index.php").exists());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"<?php // user file");
     }
 }
