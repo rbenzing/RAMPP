@@ -210,8 +210,8 @@ pub fn spawn_service(
     }
 
     // Build sanitized environment block
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-    let temp = std::env::var("TEMP").unwrap_or_else(|_| "C:\\Windows\\Temp".into());
+    let system_root = crate::paths::system_root();
+    let temp = crate::paths::temp_dir();
     let mut env_vars: Vec<(String, String)> =
         vec![("SystemRoot".into(), system_root), ("TEMP".into(), temp)];
     if svc == Service::Php {

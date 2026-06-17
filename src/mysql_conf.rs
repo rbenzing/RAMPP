@@ -116,10 +116,7 @@ pub fn initialize_mysql(cfg: &RampConfig) -> Result<(), String> {
         .arg("--console")
         .current_dir(work_dir)
         .env_clear()
-        .env(
-            "SystemRoot",
-            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()),
-        )
+        .env("SystemRoot", crate::paths::system_root())
         .output()
         .map_err(|e| format!("failed to run mysqld --initialize-insecure: {e}"))?;
 

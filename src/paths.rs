@@ -176,9 +176,96 @@ pub fn validate_document_root(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the Windows system root directory, robust to non-`C:` installations.
+/// Resolution order: `%SystemRoot%` → `%windir%` → `<%SystemDrive%>\Windows` →
+/// `C:\Windows`. The literal `C:` is only ever a last resort when no environment
+/// variable identifies the system drive.
+pub fn system_root() -> String {
+    resolve_system_root(
+        std::env::var("SystemRoot").ok(),
+        std::env::var("windir").ok(),
+        std::env::var("SystemDrive").ok(),
+    )
+}
+
+/// Pure resolution logic for `system_root`, separated for deterministic testing
+/// without mutating process environment variables.
+fn resolve_system_root(
+    system_root: Option<String>,
+    windir: Option<String>,
+    system_drive: Option<String>,
+) -> String {
+    let nonempty = |s: Option<String>| s.filter(|v| !v.is_empty());
+    nonempty(system_root)
+        .or_else(|| nonempty(windir))
+        .unwrap_or_else(|| {
+            let drive = nonempty(system_drive).unwrap_or_else(|| "C:".to_string());
+            format!("{drive}\\Windows")
+        })
+}
+
+/// Resolve a temporary directory without hardcoding a drive letter. Uses the OS
+/// temp path (honors `%TMP%`/`%TEMP%`, and the OS itself falls back to the Windows
+/// directory on the correct drive), so it is inherently drive-letter agnostic.
+pub fn temp_dir() -> String {
+    std::env::temp_dir().display().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_root_prefers_system_root_var() {
+        assert_eq!(
+            resolve_system_root(
+                Some("D:\\Windows".into()),
+                Some("X:\\win".into()),
+                Some("E:".into())
+            ),
+            "D:\\Windows"
+        );
+    }
+
+    #[test]
+    fn system_root_falls_back_to_windir() {
+        assert_eq!(
+            resolve_system_root(None, Some("D:\\Windows".into()), Some("E:".into())),
+            "D:\\Windows"
+        );
+    }
+
+    #[test]
+    fn system_root_falls_back_to_system_drive() {
+        assert_eq!(
+            resolve_system_root(None, None, Some("D:".into())),
+            "D:\\Windows"
+        );
+    }
+
+    #[test]
+    fn system_root_defaults_to_c_when_nothing_set() {
+        assert_eq!(resolve_system_root(None, None, None), "C:\\Windows");
+    }
+
+    #[test]
+    fn system_root_treats_empty_strings_as_unset() {
+        assert_eq!(
+            resolve_system_root(
+                Some(String::new()),
+                Some(String::new()),
+                Some(String::new())
+            ),
+            "C:\\Windows"
+        );
+    }
+
+    #[test]
+    fn system_root_from_env_is_nonempty() {
+        // The live resolver must always yield a usable, non-empty path.
+        assert!(!system_root().is_empty());
+        assert!(!temp_dir().is_empty());
+    }
 
     #[test]
     fn rejects_relative_install_dir() {
