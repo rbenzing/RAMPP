@@ -1,10 +1,23 @@
 # RAMPP
 
-[![Build](https://github.com/rbenzing/RAMPP/actions/workflows/release.yml/badge.svg)](https://github.com/rbenzing/RAMPP/actions/workflows/release.yml)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)](https://github.com/rbenzing/RAMPP/releases)
-[![Release](https://img.shields.io/github/v/release/rbenzing/RAMPP)](https://github.com/rbenzing/RAMPP/releases/latest)
-[![Rust](https://img.shields.io/badge/rust-2021%20edition-orange)](https://www.rust-lang.org)
+<div align="center">
+
+[![Build](https://img.shields.io/github/actions/workflow/status/rbenzing/RAMPP/release.yml?style=for-the-badge)](https://github.com/rbenzing/RAMPP/actions/workflows/release.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg?style=for-the-badge)](https://www.gnu.org/licenses/gpl-3.0)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey?style=for-the-badge)](https://github.com/rbenzing/RAMPP/releases)
+[![Release](https://img.shields.io/github/v/release/rbenzing/RAMPP?style=for-the-badge)](https://github.com/rbenzing/RAMPP/releases/latest)
+[![Rust](https://img.shields.io/badge/rust-2021%20edition-orange?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/russellbenzing)
+
+**A deterministic local development stack manager for Windows x64**
+
+⚙️ **Deterministic State Machine** • 🧱 **Apache · MySQL · PHP** • 🛡️ **Job-Object Isolation** • 🦀 **Rust**
+
+[Features](#-features) • [Installation](#-installation) • [Architecture](#-architecture) • [License](#-license)
+
+</div>
+
+---
 
 **RAMPP** is a deterministic local development stack manager for Windows x64. It orchestrates Apache, MySQL, and PHP through a formally defined state machine — no race conditions, no orphaned processes, no partial config writes.
 
@@ -12,7 +25,7 @@
 
 ---
 
-## Features
+## ✨ Features
 
 - **Deterministic** — every state transition is explicit: `STATE + EVENT → NEW STATE + SIDE EFFECTS`
 - **Safe** — every service runs inside a Windows Job Object; killing RAMPP kills the entire process tree, no zombies
@@ -27,7 +40,7 @@
 
 ---
 
-## Requirements
+## 📋 Requirements
 
 | Requirement | Notes |
 |---|---|
@@ -39,7 +52,7 @@
 
 ---
 
-## Installation
+## 📦 Installation
 
 ### 1. Download the release binary
 
@@ -106,7 +119,7 @@ Click **Start All** to bring up all three services. Apache will be at `http://12
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
 Edit `C:\rampp\ramp.toml` to change ports:
 
@@ -129,7 +142,7 @@ RAMPP validates the entire file before accepting it — an invalid config is rej
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 RAMPP is a single binary built around a pure reducer:
 
@@ -193,7 +206,7 @@ Three consecutive failures trigger `HEALTH_CHECK_FAIL`, which kills the service 
 
 ---
 
-## Building from source
+## 🔨 Building from source
 
 ```bash
 # Prerequisites: Rust stable toolchain (rustup.rs), MSVC build tools
@@ -213,7 +226,7 @@ cargo fmt -- --check
 
 ---
 
-## Security model
+## 🔒 Security model
 
 - Services bind to `127.0.0.1` only — no external exposure by default
 - All binary paths are absolute and validated against the install directory — no PATH-based execution
@@ -224,6 +237,27 @@ cargo fmt -- --check
 
 ---
 
-## License
+## 📄 License
 
 RAMPP is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License v3.0](LICENSE).
+
+---
+
+## 👤 About the Author
+
+Built by **Russell Benzing**. RAMPP is a deterministic, auditable alternative to XAMPP/Laragon for local Windows development.
+
+---
+
+## 🆘 Support
+
+- **Issues**: [GitHub Issues](https://github.com/rbenzing/RAMPP/issues)
+- **Releases**: [github.com/rbenzing/RAMPP/releases](https://github.com/rbenzing/RAMPP/releases)
+
+If RAMPP is useful to you, you can support the work:
+
+<div align="center">
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/russellbenzing)
+
+</div>
