@@ -1,4 +1,18 @@
-use crate::state::RampConfig;
+use crate::state::{
+    RampConfig, HEALTH_ENDPOINT_BODY, HEALTH_ENDPOINT_DIR, HEALTH_ENDPOINT_FILE,
+    HEALTH_ENDPOINT_PATH,
+};
+use std::path::PathBuf;
+
+/// Directory holding RAMP's health endpoint file, inside the install dir.
+pub fn health_endpoint_dir(cfg: &RampConfig) -> PathBuf {
+    cfg.install_dir.join("apache").join(HEALTH_ENDPOINT_DIR)
+}
+
+/// Full path to the file Apache serves at `HEALTH_ENDPOINT_PATH`.
+pub fn health_endpoint_file(cfg: &RampConfig) -> PathBuf {
+    health_endpoint_dir(cfg).join(HEALTH_ENDPOINT_FILE)
+}
 
 /// Generate a minimal httpd.conf for RAMP's bundled Apache layout.
 /// Only called when the file does not already exist (never overwrites user edits).
@@ -16,6 +30,15 @@ pub fn generate_httpd_conf_with_ports(cfg: &RampConfig, port: u16, php_port: u16
     let doc_root = cfg
         .apache
         .document_root
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let health_url = HEALTH_ENDPOINT_PATH;
+    let health_dir = health_endpoint_dir(cfg)
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let health_file = health_endpoint_file(cfg)
         .display()
         .to_string()
         .replace('\\', "/");
@@ -59,6 +82,26 @@ ServerName 127.0.0.1:{port}
 <Directory />
     AllowOverride none
     Require all denied
+</Directory>
+
+# RAMP readiness/health endpoint — served by Apache itself, never by the user's app.
+#
+# The DocumentRoot below runs with "AllowOverride All" so project .htaccess files
+# work. Front-controller frameworks (Laravel, Symfony, WordPress) ship a rewrite
+# like "RewriteRule ^(.*)$ index.php [QSA,L]" that captures EVERY URL that isn't a
+# real file — including a probe path. That would route RAMP's health check through
+# mod_proxy_fcgi into PHP, so Apache would only look "up" once PHP-CGI, MySQL and
+# the user's application had all booted, and each 2s health check would cost a full
+# application request.
+#
+# mod_alias maps the URL to this directory at translation time, before per-directory
+# rewrites are considered, and "AllowOverride None" here means no .htaccess applies.
+# The probe therefore stays a static file read that reflects Apache's health alone.
+Alias "{health_url}" "{health_file}"
+<Directory "{health_dir}">
+    AllowOverride None
+    Options None
+    Require all granted
 </Directory>
 
 DocumentRoot "{doc_root}"
@@ -128,15 +171,42 @@ pub fn rewrite_httpd_conf_with_ports(
     let conf_path = &cfg.apache.conf;
     let dir = conf_path.parent().ok_or("httpd.conf has no parent dir")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
+    ensure_health_endpoint(cfg)?;
     let content = generate_httpd_conf_with_ports(cfg, port, php_port);
     crate::config::atomic_write(conf_path, content.as_bytes())
         .map_err(|e| format!("cannot rewrite httpd.conf: {e}"))
 }
 
-/// Write httpd.conf only if it doesn't already exist.
+/// Marker line RAMP writes into every conf it generates, used to tell its own
+/// output apart from a conf the user hand-wrote or edited wholesale.
+const GENERATED_CONF_MARKER: &str = "# RAMP — generated httpd.conf (do not remove this line";
+
+/// True when `content` is a RAMP-generated conf that predates the health endpoint.
+/// User-authored confs (no marker) are never considered upgradable.
+fn needs_health_endpoint_upgrade(content: &str) -> bool {
+    content.contains(GENERATED_CONF_MARKER)
+        && !content.contains(&format!("Alias \"{HEALTH_ENDPOINT_PATH}\" \""))
+}
+
+/// Write httpd.conf if it doesn't already exist.
+///
+/// If it does exist and is a RAMP-generated conf from before the health endpoint,
+/// regenerate it — otherwise upgraded installs would keep a readiness probe that a
+/// project `.htaccess` can capture. A conf without RAMP's marker is user-owned and
+/// is always left exactly as-is.
 pub fn ensure_httpd_conf(cfg: &RampConfig) -> Result<(), String> {
     let conf_path = &cfg.apache.conf;
+    // The alias in the conf points here; never let it dangle.
+    ensure_health_endpoint(cfg)?;
     if conf_path.exists() {
+        let existing = std::fs::read_to_string(conf_path)
+            .map_err(|e| format!("cannot read httpd.conf: {e}"))?;
+        if needs_health_endpoint_upgrade(&existing) {
+            log::info!("upgrading generated httpd.conf: adding RAMP health endpoint");
+            let content = generate_httpd_conf(cfg);
+            return crate::config::atomic_write(conf_path, content.as_bytes())
+                .map_err(|e| format!("cannot upgrade httpd.conf: {e}"));
+        }
         return Ok(());
     }
     let dir = conf_path.parent().ok_or("httpd.conf has no parent dir")?;
@@ -144,6 +214,17 @@ pub fn ensure_httpd_conf(cfg: &RampConfig) -> Result<(), String> {
     let content = generate_httpd_conf(cfg);
     crate::config::atomic_write(conf_path, content.as_bytes())
         .map_err(|e| format!("cannot write httpd.conf: {e}"))
+}
+
+/// Ensure the health endpoint file Apache serves at `HEALTH_ENDPOINT_PATH` exists.
+/// Rewritten unconditionally: it is RAMP-owned, tiny, and must never drift.
+pub fn ensure_health_endpoint(cfg: &RampConfig) -> Result<(), String> {
+    let dir = health_endpoint_dir(cfg);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create health endpoint dir {}: {e}", dir.display()))?;
+    let file = health_endpoint_file(cfg);
+    crate::config::atomic_write(&file, HEALTH_ENDPOINT_BODY.as_bytes())
+        .map_err(|e| format!("cannot write health endpoint file: {e}"))
 }
 
 /// Ensure the configured DocumentRoot exists. Seeds a default index.php ONLY when
@@ -168,7 +249,9 @@ pub fn ensure_document_root(cfg: &RampConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ApacheConfig, MysqlConfig, PhpConfig, PhpMyAdminConfig, RampConfig};
+    use crate::state::{
+        ApacheConfig, MysqlConfig, PhpConfig, PhpMyAdminConfig, RampConfig, HEALTH_ENDPOINT_PATH,
+    };
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -197,6 +280,93 @@ mod tests {
                 mysql_password: String::new(),
             },
         }
+    }
+
+    /// The readiness probe must be served by Apache itself, never by the user's
+    /// DocumentRoot. A front-controller `.htaccess` (Laravel/Symfony/WordPress)
+    /// rewrites every unmatched URL into index.php, which would route the probe
+    /// through PHP-CGI and make Apache's health depend on the user's app booting.
+    /// Aliasing the probe to a RAMP-owned directory bypasses the DocumentRoot
+    /// entirely, because mod_alias maps the URL before per-directory rewrites run.
+    #[test]
+    fn health_endpoint_is_aliased_outside_document_root() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = test_cfg(tmp.path());
+        cfg.apache.document_root = tmp.path().join("laravel_app").join("public");
+        let conf = generate_httpd_conf(&cfg);
+
+        let expected_target = tmp
+            .path()
+            .join("apache")
+            .join("ramp-health")
+            .join("health.txt")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        assert!(
+            conf.contains(&format!(
+                "Alias \"{HEALTH_ENDPOINT_PATH}\" \"{expected_target}\""
+            )),
+            "health endpoint must be aliased to a RAMP-owned file, conf was:\n{conf}"
+        );
+
+        let doc_root = cfg
+            .apache
+            .document_root
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        assert!(
+            !expected_target.starts_with(&doc_root),
+            "health endpoint target must live outside the DocumentRoot"
+        );
+
+        // Being outside the DocumentRoot is not enough on its own: if the health
+        // directory allowed overrides, an .htaccess dropped beside it could still
+        // rewrite the probe into PHP.
+        let health_dir = tmp
+            .path()
+            .join("apache")
+            .join("ramp-health")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let health_block = conf
+            .split(&format!("<Directory \"{health_dir}\">"))
+            .nth(1)
+            .expect("conf must contain a <Directory> block for the health endpoint")
+            .split("</Directory>")
+            .next()
+            .unwrap_or("");
+        assert!(
+            health_block.contains("AllowOverride None"),
+            "health endpoint directory must disable .htaccess overrides, block was:\n{health_block}"
+        );
+    }
+
+    #[test]
+    fn ensure_health_endpoint_creates_file() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        ensure_health_endpoint(&cfg).unwrap();
+        let file = health_endpoint_file(&cfg);
+        assert!(file.exists(), "health endpoint file must be created");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            crate::state::HEALTH_ENDPOINT_BODY
+        );
+    }
+
+    #[test]
+    fn ensure_health_endpoint_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        ensure_health_endpoint(&cfg).unwrap();
+        ensure_health_endpoint(&cfg).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(health_endpoint_file(&cfg)).unwrap(),
+            crate::state::HEALTH_ENDPOINT_BODY
+        );
     }
 
     #[test]
@@ -259,6 +429,98 @@ mod tests {
         std::fs::write(&cfg.apache.conf, b"custom").unwrap();
         ensure_httpd_conf(&cfg).unwrap();
         assert_eq!(std::fs::read(&cfg.apache.conf).unwrap(), b"custom");
+    }
+
+    /// Existing installs already have a generated httpd.conf on disk, and
+    /// `ensure_httpd_conf` skips any file that exists. Without an upgrade path the
+    /// health endpoint would only ever reach brand-new installs, leaving upgraded
+    /// users stuck with a probe that their DocumentRoot can still capture.
+    #[test]
+    fn ensure_httpd_conf_upgrades_generated_conf_missing_health_endpoint() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        std::fs::create_dir_all(cfg.apache.conf.parent().unwrap()).unwrap();
+        // A v1.4.0-era generated conf: carries RAMP's marker, predates the alias.
+        let stale = generate_httpd_conf(&cfg).replace(
+            &format!("Alias \"{HEALTH_ENDPOINT_PATH}\""),
+            "# (no health endpoint) Alias \"/__legacy\"",
+        );
+        assert!(
+            !stale.contains(&format!("Alias \"{HEALTH_ENDPOINT_PATH}\" \"")),
+            "test fixture must genuinely lack the health alias"
+        );
+        std::fs::write(&cfg.apache.conf, &stale).unwrap();
+
+        ensure_httpd_conf(&cfg).unwrap();
+
+        let after = std::fs::read_to_string(&cfg.apache.conf).unwrap();
+        assert!(
+            after.contains(&format!("Alias \"{HEALTH_ENDPOINT_PATH}\" \"")),
+            "a RAMP-generated conf without the health endpoint must be upgraded"
+        );
+    }
+
+    /// The upgrade must key off RAMP's own marker line. A hand-written conf has no
+    /// marker and must survive untouched even though it lacks the health endpoint.
+    #[test]
+    fn ensure_httpd_conf_never_upgrades_user_authored_conf() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        std::fs::create_dir_all(cfg.apache.conf.parent().unwrap()).unwrap();
+        let user_conf = "# my own httpd.conf\nListen 127.0.0.1:8080\n";
+        std::fs::write(&cfg.apache.conf, user_conf).unwrap();
+
+        ensure_httpd_conf(&cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&cfg.apache.conf).unwrap(),
+            user_conf,
+            "user-authored httpd.conf must never be rewritten"
+        );
+    }
+
+    /// An already-current generated conf must be left alone, so port choices the
+    /// executor previously resolved into it are not clobbered on the next launch.
+    #[test]
+    fn ensure_httpd_conf_leaves_current_generated_conf_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        std::fs::create_dir_all(cfg.apache.conf.parent().unwrap()).unwrap();
+        // Generated, current (has the alias), but with executor-resolved ports.
+        let resolved = generate_httpd_conf_with_ports(&cfg, 8099, 9001);
+        std::fs::write(&cfg.apache.conf, &resolved).unwrap();
+
+        ensure_httpd_conf(&cfg).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&cfg.apache.conf).unwrap(),
+            resolved,
+            "current generated conf must not be regenerated"
+        );
+    }
+
+    /// Writing a conf that aliases the health endpoint without creating its target
+    /// leaves a dangling alias. Both conf writers must guarantee the file exists.
+    #[test]
+    fn ensure_httpd_conf_also_creates_health_endpoint_file() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        ensure_httpd_conf(&cfg).unwrap();
+        assert!(
+            health_endpoint_file(&cfg).exists(),
+            "generating httpd.conf must also create the aliased health file"
+        );
+    }
+
+    #[test]
+    fn rewrite_httpd_conf_with_ports_also_creates_health_endpoint_file() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        rewrite_httpd_conf_with_ports(&cfg, 8099, 9001).unwrap();
+        assert!(
+            health_endpoint_file(&cfg).exists(),
+            "rewriting httpd.conf must also create the aliased health file"
+        );
     }
 
     #[test]

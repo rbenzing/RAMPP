@@ -1,3 +1,4 @@
+use crate::state::{HEALTH_ENDPOINT_DIR, HEALTH_ENDPOINT_FILE};
 use std::path::{Path, PathBuf};
 
 /// Validates and resolves all install-relative paths.
@@ -11,6 +12,10 @@ pub struct InstallPaths {
     pub apache_bin: PathBuf,
     pub apache_conf: PathBuf,
     pub apache_logs: PathBuf,
+    /// RAMP-owned directory Apache serves the readiness probe from, kept outside
+    /// the user's DocumentRoot so no project `.htaccess` can capture the probe.
+    pub apache_health_dir: PathBuf,
+    pub apache_health_file: PathBuf,
     pub mysql_bin: PathBuf,
     pub mysql_data: PathBuf,
     pub mysql_ini: PathBuf,
@@ -44,6 +49,11 @@ impl InstallPaths {
             apache_bin: root.join("apache").join("bin").join("httpd.exe"),
             apache_conf: root.join("apache").join("conf").join("httpd.conf"),
             apache_logs: root.join("logs"),
+            apache_health_dir: root.join("apache").join(HEALTH_ENDPOINT_DIR),
+            apache_health_file: root
+                .join("apache")
+                .join(HEALTH_ENDPOINT_DIR)
+                .join(HEALTH_ENDPOINT_FILE),
             mysql_bin: root.join("mysql").join("bin").join("mysqld.exe"),
             mysql_data: root.join("mysql").join("data"),
             mysql_ini: root.join("mysql").join("my.ini"),
@@ -368,6 +378,22 @@ mod tests {
         assert!(p.config.starts_with(tmp.path()));
         assert!(p.apache_bin.starts_with(tmp.path()));
         assert!(p.mysql_bin.starts_with(tmp.path()));
+    }
+
+    /// The health endpoint is a RAMP-owned artifact inside the install dir, so the
+    /// path contract must name it — and it must satisfy the same critical-path rules
+    /// as every other RAMP-owned file.
+    #[test]
+    fn install_paths_includes_health_endpoint_paths() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let paths = InstallPaths::from_install_dir(tmp.path()).unwrap();
+        assert!(paths.apache_health_dir.ends_with("ramp-health"));
+        assert!(paths.apache_health_file.ends_with("health.txt"));
+        assert!(
+            validate_critical_path(&paths.apache_health_file, tmp.path(), false).is_ok(),
+            "health endpoint file must be a valid critical path inside install_dir"
+        );
     }
 
     #[test]
