@@ -250,7 +250,28 @@ pub fn retry_delay(retry_count: u32) -> Option<Duration> {
     RETRY_DELAYS.get(idx).map(|&s| Duration::from_secs(s))
 }
 
-pub const APACHE_READY_TIMEOUT: Duration = Duration::from_secs(3);
+/// URL path RAMP probes to decide whether Apache is up. Apache serves this from a
+/// RAMP-owned directory (see `apache_conf`), so the probe never touches the user's
+/// DocumentRoot, `.htaccess`, or PHP.
+pub const HEALTH_ENDPOINT_PATH: &str = "/__ramp_health";
+
+/// Directory (relative to `<install_dir>/apache`) holding the health endpoint file.
+pub const HEALTH_ENDPOINT_DIR: &str = "ramp-health";
+
+/// File name served at `HEALTH_ENDPOINT_PATH`.
+pub const HEALTH_ENDPOINT_FILE: &str = "health.txt";
+
+/// Body written to the health endpoint file.
+pub const HEALTH_ENDPOINT_BODY: &str = "RAMP OK\n";
+
+/// Per-request timeout for a single HTTP readiness probe.
+pub const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Apache gets a wider readiness budget than the other services: a cold Windows
+/// start can take ~2.5s to begin accepting connections, and a single stalled probe
+/// costs `HEALTH_PROBE_TIMEOUT`. Three seconds left no room for a retry, so a slow
+/// start was being reported as a crash.
+pub const APACHE_READY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MYSQL_READY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const PHP_READY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(2);

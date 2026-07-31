@@ -1,6 +1,7 @@
 use crate::events::Event;
 use crate::state::{
-    Service, APACHE_READY_TIMEOUT, HEALTH_CHECK_INTERVAL, MYSQL_READY_TIMEOUT, PHP_READY_TIMEOUT,
+    Service, APACHE_READY_TIMEOUT, HEALTH_CHECK_INTERVAL, HEALTH_ENDPOINT_PATH,
+    HEALTH_PROBE_TIMEOUT, MYSQL_READY_TIMEOUT, PHP_READY_TIMEOUT,
 };
 use crossbeam_channel::Sender;
 use std::io::Read;
@@ -9,18 +10,27 @@ use std::time::{Duration, Instant};
 
 /// Check if Apache is ready.
 ///
-/// Probes a deliberately-nonexistent path so Apache returns 404 from its own error
-/// handler (with the Server header) without invoking the PHP FastCGI proxy. This
-/// avoids hanging the readiness check when PHP-CGI isn't running yet — requesting
-/// "/" would route through `mod_proxy_fcgi` and block for the proxy connect timeout.
+/// Probes `HEALTH_ENDPOINT_PATH`, which the generated httpd.conf aliases to a
+/// RAMP-owned static file outside the DocumentRoot (see `apache_conf`). That keeps
+/// the probe a plain file read: it never reaches `mod_proxy_fcgi`, so it does not
+/// hang when PHP-CGI is down and does not depend on the user's application booting.
+///
+/// Redirects are deliberately NOT followed. Whatever answers the probe, the only
+/// question is whether Apache is serving, and the redirect response already answers
+/// it via the Server header. Following a `Location` would hand control of the
+/// probe's latency and destination to whatever the redirect points at.
 ///
 /// Any HTTP response identifying as Apache via the Server header counts as ready.
 pub fn check_apache_ready(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{port}/__ramp_health");
-    match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
+    let url = format!("http://127.0.0.1:{port}{HEALTH_ENDPOINT_PATH}");
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(HEALTH_PROBE_TIMEOUT)
+        .build();
+    match agent.get(&url).call() {
         Ok(resp) => server_is_apache(resp.header("Server").unwrap_or("")),
         // 4xx/5xx responses come back as Err::Status with the underlying response —
-        // a 404 from Apache is exactly what we want to see here.
+        // a 404 from Apache still proves Apache is up and answering.
         Err(ureq::Error::Status(_, resp)) => server_is_apache(resp.header("Server").unwrap_or("")),
         Err(_) => false,
     }
