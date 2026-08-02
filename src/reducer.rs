@@ -444,23 +444,23 @@ mod tests {
 
     fn make_state() -> AppState {
         let config = RampConfig {
-            install_dir: std::path::PathBuf::from("C:\\ramp"),
+            install_dir: std::path::PathBuf::from("C:\\rampp"),
             apache: ApacheConfig {
                 port: 80,
-                bin: std::path::PathBuf::from("C:\\ramp\\apache\\bin\\httpd.exe"),
-                conf: std::path::PathBuf::from("C:\\ramp\\apache\\conf\\httpd.conf"),
-                document_root: std::path::PathBuf::from("C:\\ramp\\apache\\htdocs"),
+                bin: std::path::PathBuf::from("C:\\rampp\\apache\\bin\\httpd.exe"),
+                conf: std::path::PathBuf::from("C:\\rampp\\apache\\conf\\httpd.conf"),
+                document_root: std::path::PathBuf::from("C:\\rampp\\apache\\htdocs"),
             },
             mysql: MysqlConfig {
                 port: 3306,
-                bin: std::path::PathBuf::from("C:\\ramp\\mysql\\bin\\mysqld.exe"),
-                data_dir: std::path::PathBuf::from("C:\\ramp\\mysql\\data"),
-                ini: std::path::PathBuf::from("C:\\ramp\\mysql\\my.ini"),
+                bin: std::path::PathBuf::from("C:\\rampp\\mysql\\bin\\mysqld.exe"),
+                data_dir: std::path::PathBuf::from("C:\\rampp\\mysql\\data"),
+                ini: std::path::PathBuf::from("C:\\rampp\\mysql\\my.ini"),
             },
             php: PhpConfig {
                 port: 9000,
-                bin: std::path::PathBuf::from("C:\\ramp\\php\\php-cgi.exe"),
-                ini: std::path::PathBuf::from("C:\\ramp\\php\\php.ini"),
+                bin: std::path::PathBuf::from("C:\\rampp\\php\\php-cgi.exe"),
+                ini: std::path::PathBuf::from("C:\\rampp\\php\\php.ini"),
             },
             phpmyadmin: crate::state::PhpMyAdminConfig {
                 mysql_user: "root".to_string(),

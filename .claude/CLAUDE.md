@@ -54,7 +54,7 @@ Every service process **must** be attached to a Windows Job Object at spawn time
 
 ### Configuration System
 
-`ramp.toml` is the source of truth. All writes must follow: write temp file → `fsync` → atomic rename. Invalid configs are rejected entirely; the last valid config is always preserved.
+`rampp.toml` is the source of truth. All writes must follow: write temp file → `fsync` → atomic rename. Invalid configs are rejected entirely; the last valid config is always preserved.
 
 ### Readiness Contracts
 
@@ -125,7 +125,7 @@ desired_state.php: DesiredServiceState
 | `src/process.rs` | Windows Job Object spawn/kill |
 | `src/health.rs` | Apache HTTP + MySQL TCP + PHP TCP readiness/health checks |
 | `src/php_conf.rs` | `php.ini` generation for PHP-CGI |
-| `src/config.rs` | `ramp.toml` load/validate + atomic write helper |
+| `src/config.rs` | `rampp.toml` load/validate + atomic write helper |
 | `src/paths.rs` | Install directory contract + path validation |
 | `src/logger.rs` | Bounded ring buffer for log lines |
 | `src/tray.rs` | Windows system tray (tray-item crate) |

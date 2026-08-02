@@ -79,7 +79,7 @@ pub enum SideEffect {
     StopHealthCheck(Service),
     LogEvent(String),
     PersistDesiredState,
-    /// Refresh the executor's config copy from state and persist ramp.toml.
+    /// Refresh the executor's config copy from state and persist rampp.toml.
     PersistConfig,
     TogglePhpMyAdmin(bool),
     OpenPhpMyAdminBrowser,

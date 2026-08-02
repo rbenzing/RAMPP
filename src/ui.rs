@@ -50,7 +50,7 @@ impl eframe::App for RampApp {
         };
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("RAMP");
+            ui.heading("RAMPP");
             ui.separator();
 
             let mysql_running = state.mysql.state == ServiceState::Running;

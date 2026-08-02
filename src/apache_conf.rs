@@ -4,7 +4,7 @@ use crate::state::{
 };
 use std::path::PathBuf;
 
-/// Directory holding RAMP's health endpoint file, inside the install dir.
+/// Directory holding RAMPP's health endpoint file, inside the install dir.
 pub fn health_endpoint_dir(cfg: &RampConfig) -> PathBuf {
     cfg.install_dir.join("apache").join(HEALTH_ENDPOINT_DIR)
 }
@@ -14,7 +14,7 @@ pub fn health_endpoint_file(cfg: &RampConfig) -> PathBuf {
     health_endpoint_dir(cfg).join(HEALTH_ENDPOINT_FILE)
 }
 
-/// Generate a minimal httpd.conf for RAMP's bundled Apache layout.
+/// Generate a minimal httpd.conf for RAMPP's bundled Apache layout.
 /// Only called when the file does not already exist (never overwrites user edits).
 pub fn generate_httpd_conf(cfg: &RampConfig) -> String {
     generate_httpd_conf_with_ports(cfg, cfg.apache.port, cfg.php.port)
@@ -44,7 +44,7 @@ pub fn generate_httpd_conf_with_ports(cfg: &RampConfig, port: u16, php_port: u16
         .replace('\\', "/");
 
     format!(
-        r#"# RAMP — generated httpd.conf (do not remove this line — RAMP uses it to detect generated configs)
+        r#"# RAMPP — generated httpd.conf (do not remove this line — RAMPP uses it to detect generated configs)
 ServerRoot "{apache_dir}"
 
 Listen 127.0.0.1:{port}
@@ -84,12 +84,12 @@ ServerName 127.0.0.1:{port}
     Require all denied
 </Directory>
 
-# RAMP readiness/health endpoint — served by Apache itself, never by the user's app.
+# RAMPP readiness/health endpoint — served by Apache itself, never by the user's app.
 #
 # The DocumentRoot below runs with "AllowOverride All" so project .htaccess files
 # work. Front-controller frameworks (Laravel, Symfony, WordPress) ship a rewrite
 # like "RewriteRule ^(.*)$ index.php [QSA,L]" that captures EVERY URL that isn't a
-# real file — including a probe path. That would route RAMP's health check through
+# real file — including a probe path. That would route RAMPP's health check through
 # mod_proxy_fcgi into PHP, so Apache would only look "up" once PHP-CGI, MySQL and
 # the user's application had all booted, and each 2s health check would cost a full
 # application request.
@@ -155,7 +155,7 @@ LogLevel warn
     AddType application/x-gzip .gz .tgz
 </IfModule>
 
-# phpMyAdmin — managed by RAMP (do not remove this line)
+# phpMyAdmin — managed by RAMPP (do not remove this line)
 Include "conf/phpmyadmin.conf"
 "#
     )
@@ -177,11 +177,11 @@ pub fn rewrite_httpd_conf_with_ports(
         .map_err(|e| format!("cannot rewrite httpd.conf: {e}"))
 }
 
-/// Marker line RAMP writes into every conf it generates, used to tell its own
+/// Marker line RAMPP writes into every conf it generates, used to tell its own
 /// output apart from a conf the user hand-wrote or edited wholesale.
-const GENERATED_CONF_MARKER: &str = "# RAMP — generated httpd.conf (do not remove this line";
+const GENERATED_CONF_MARKER: &str = "# RAMPP — generated httpd.conf (do not remove this line";
 
-/// True when `content` is a RAMP-generated conf that predates the health endpoint.
+/// True when `content` is a RAMPP-generated conf that predates the health endpoint.
 /// User-authored confs (no marker) are never considered upgradable.
 fn needs_health_endpoint_upgrade(content: &str) -> bool {
     content.contains(GENERATED_CONF_MARKER)
@@ -190,9 +190,9 @@ fn needs_health_endpoint_upgrade(content: &str) -> bool {
 
 /// Write httpd.conf if it doesn't already exist.
 ///
-/// If it does exist and is a RAMP-generated conf from before the health endpoint,
+/// If it does exist and is a RAMPP-generated conf from before the health endpoint,
 /// regenerate it — otherwise upgraded installs would keep a readiness probe that a
-/// project `.htaccess` can capture. A conf without RAMP's marker is user-owned and
+/// project `.htaccess` can capture. A conf without RAMPP's marker is user-owned and
 /// is always left exactly as-is.
 pub fn ensure_httpd_conf(cfg: &RampConfig) -> Result<(), String> {
     let conf_path = &cfg.apache.conf;
@@ -202,7 +202,7 @@ pub fn ensure_httpd_conf(cfg: &RampConfig) -> Result<(), String> {
         let existing = std::fs::read_to_string(conf_path)
             .map_err(|e| format!("cannot read httpd.conf: {e}"))?;
         if needs_health_endpoint_upgrade(&existing) {
-            log::info!("upgrading generated httpd.conf: adding RAMP health endpoint");
+            log::info!("upgrading generated httpd.conf: adding RAMPP health endpoint");
             let content = generate_httpd_conf(cfg);
             return crate::config::atomic_write(conf_path, content.as_bytes())
                 .map_err(|e| format!("cannot upgrade httpd.conf: {e}"));
@@ -217,7 +217,7 @@ pub fn ensure_httpd_conf(cfg: &RampConfig) -> Result<(), String> {
 }
 
 /// Ensure the health endpoint file Apache serves at `HEALTH_ENDPOINT_PATH` exists.
-/// Rewritten unconditionally: it is RAMP-owned, tiny, and must never drift.
+/// Rewritten unconditionally: it is RAMPP-owned, tiny, and must never drift.
 pub fn ensure_health_endpoint(cfg: &RampConfig) -> Result<(), String> {
     let dir = health_endpoint_dir(cfg);
     std::fs::create_dir_all(&dir)
@@ -286,7 +286,7 @@ mod tests {
     /// DocumentRoot. A front-controller `.htaccess` (Laravel/Symfony/WordPress)
     /// rewrites every unmatched URL into index.php, which would route the probe
     /// through PHP-CGI and make Apache's health depend on the user's app booting.
-    /// Aliasing the probe to a RAMP-owned directory bypasses the DocumentRoot
+    /// Aliasing the probe to a RAMPP-owned directory bypasses the DocumentRoot
     /// entirely, because mod_alias maps the URL before per-directory rewrites run.
     #[test]
     fn health_endpoint_is_aliased_outside_document_root() {
@@ -298,7 +298,7 @@ mod tests {
         let expected_target = tmp
             .path()
             .join("apache")
-            .join("ramp-health")
+            .join("rampp-health")
             .join("health.txt")
             .display()
             .to_string()
@@ -307,7 +307,7 @@ mod tests {
             conf.contains(&format!(
                 "Alias \"{HEALTH_ENDPOINT_PATH}\" \"{expected_target}\""
             )),
-            "health endpoint must be aliased to a RAMP-owned file, conf was:\n{conf}"
+            "health endpoint must be aliased to a RAMPP-owned file, conf was:\n{conf}"
         );
 
         let doc_root = cfg
@@ -327,7 +327,7 @@ mod tests {
         let health_dir = tmp
             .path()
             .join("apache")
-            .join("ramp-health")
+            .join("rampp-health")
             .display()
             .to_string()
             .replace('\\', "/");
@@ -440,7 +440,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
         std::fs::create_dir_all(cfg.apache.conf.parent().unwrap()).unwrap();
-        // A v1.4.0-era generated conf: carries RAMP's marker, predates the alias.
+        // A v1.4.0-era generated conf: carries RAMPP's marker, predates the alias.
         let stale = generate_httpd_conf(&cfg).replace(
             &format!("Alias \"{HEALTH_ENDPOINT_PATH}\""),
             "# (no health endpoint) Alias \"/__legacy\"",
@@ -456,11 +456,11 @@ mod tests {
         let after = std::fs::read_to_string(&cfg.apache.conf).unwrap();
         assert!(
             after.contains(&format!("Alias \"{HEALTH_ENDPOINT_PATH}\" \"")),
-            "a RAMP-generated conf without the health endpoint must be upgraded"
+            "a RAMPP-generated conf without the health endpoint must be upgraded"
         );
     }
 
-    /// The upgrade must key off RAMP's own marker line. A hand-written conf has no
+    /// The upgrade must key off RAMPP's own marker line. A hand-written conf has no
     /// marker and must survive untouched even though it lacks the health endpoint.
     #[test]
     fn ensure_httpd_conf_never_upgrades_user_authored_conf() {

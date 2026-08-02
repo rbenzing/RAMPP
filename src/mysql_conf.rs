@@ -1,6 +1,6 @@
 use crate::state::RampConfig;
 
-/// Generate a minimal my.ini for MySQL 9.x compatible with RAMP's layout.
+/// Generate a minimal my.ini for MySQL 9.x compatible with RAMPP's layout.
 /// Only called when the file does not already exist.
 pub fn generate_my_ini(cfg: &RampConfig) -> String {
     generate_my_ini_with_port(cfg, cfg.mysql.port)
@@ -20,7 +20,7 @@ pub fn generate_my_ini_with_port(cfg: &RampConfig, port: u16) -> String {
         .replace('\\', "/");
 
     format!(
-        r#"# RAMP — generated my.ini
+        r#"# RAMPP — generated my.ini
 [mysqld]
 basedir     = "{mysql_dir}"
 datadir     = "{data_dir}"

@@ -12,7 +12,7 @@ pub struct InstallPaths {
     pub apache_bin: PathBuf,
     pub apache_conf: PathBuf,
     pub apache_logs: PathBuf,
-    /// RAMP-owned directory Apache serves the readiness probe from, kept outside
+    /// RAMPP-owned directory Apache serves the readiness probe from, kept outside
     /// the user's DocumentRoot so no project `.htaccess` can capture the probe.
     pub apache_health_dir: PathBuf,
     pub apache_health_file: PathBuf,
@@ -43,9 +43,9 @@ impl InstallPaths {
         validate_no_symlink_in_path(&root)?;
 
         Ok(Self {
-            config: root.join("ramp.toml"),
-            state_file: root.join("ramp.state"),
-            log_file: root.join("logs").join("ramp.log"),
+            config: root.join("rampp.toml"),
+            state_file: root.join("rampp.state"),
+            log_file: root.join("logs").join("rampp.log"),
             apache_bin: root.join("apache").join("bin").join("httpd.exe"),
             apache_conf: root.join("apache").join("conf").join("httpd.conf"),
             apache_logs: root.join("logs"),
@@ -284,22 +284,22 @@ mod tests {
 
     #[test]
     fn rejects_traversal() {
-        let base = Path::new("C:\\ramp");
-        let bad = Path::new("C:\\ramp\\..\\windows\\system32\\evil.exe");
+        let base = Path::new("C:\\rampp");
+        let bad = Path::new("C:\\rampp\\..\\windows\\system32\\evil.exe");
         assert!(validate_critical_path(bad, base, false).is_err());
     }
 
     #[test]
     fn rejects_path_outside_install_dir() {
-        let base = Path::new("C:\\ramp");
+        let base = Path::new("C:\\rampp");
         let outside = Path::new("C:\\windows\\system32\\httpd.exe");
         assert!(validate_critical_path(outside, base, false).is_err());
     }
 
     #[test]
     fn accepts_valid_path() {
-        let base = Path::new("C:\\ramp");
-        let ok = Path::new("C:\\ramp\\apache\\bin\\httpd.exe");
+        let base = Path::new("C:\\rampp");
+        let ok = Path::new("C:\\rampp\\apache\\bin\\httpd.exe");
         assert!(validate_critical_path(ok, base, true).is_ok());
     }
 
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn rejects_nonexistent_but_out_of_bounds_path() {
         // Path that doesn't exist yet but is outside install_dir
-        let base = Path::new("C:\\ramp");
+        let base = Path::new("C:\\rampp");
         let outside = Path::new("C:\\other\\file.txt");
         assert!(validate_critical_path(outside, base, false).is_err());
     }
@@ -380,15 +380,15 @@ mod tests {
         assert!(p.mysql_bin.starts_with(tmp.path()));
     }
 
-    /// The health endpoint is a RAMP-owned artifact inside the install dir, so the
+    /// The health endpoint is a RAMPP-owned artifact inside the install dir, so the
     /// path contract must name it — and it must satisfy the same critical-path rules
-    /// as every other RAMP-owned file.
+    /// as every other RAMPP-owned file.
     #[test]
     fn install_paths_includes_health_endpoint_paths() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         let paths = InstallPaths::from_install_dir(tmp.path()).unwrap();
-        assert!(paths.apache_health_dir.ends_with("ramp-health"));
+        assert!(paths.apache_health_dir.ends_with("rampp-health"));
         assert!(paths.apache_health_file.ends_with("health.txt"));
         assert!(
             validate_critical_path(&paths.apache_health_file, tmp.path(), false).is_ok(),

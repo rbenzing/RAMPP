@@ -250,19 +250,19 @@ pub fn retry_delay(retry_count: u32) -> Option<Duration> {
     RETRY_DELAYS.get(idx).map(|&s| Duration::from_secs(s))
 }
 
-/// URL path RAMP probes to decide whether Apache is up. Apache serves this from a
-/// RAMP-owned directory (see `apache_conf`), so the probe never touches the user's
+/// URL path RAMPP probes to decide whether Apache is up. Apache serves this from a
+/// RAMPP-owned directory (see `apache_conf`), so the probe never touches the user's
 /// DocumentRoot, `.htaccess`, or PHP.
 pub const HEALTH_ENDPOINT_PATH: &str = "/__ramp_health";
 
 /// Directory (relative to `<install_dir>/apache`) holding the health endpoint file.
-pub const HEALTH_ENDPOINT_DIR: &str = "ramp-health";
+pub const HEALTH_ENDPOINT_DIR: &str = "rampp-health";
 
 /// File name served at `HEALTH_ENDPOINT_PATH`.
 pub const HEALTH_ENDPOINT_FILE: &str = "health.txt";
 
 /// Body written to the health endpoint file.
-pub const HEALTH_ENDPOINT_BODY: &str = "RAMP OK\n";
+pub const HEALTH_ENDPOINT_BODY: &str = "RAMPP OK\n";
 
 /// Per-request timeout for a single HTTP readiness probe.
 pub const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);

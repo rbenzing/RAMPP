@@ -41,9 +41,9 @@ fn main() {
         .expect("executable has no parent directory")
         .to_path_buf();
 
-    log::info!("RAMP starting — install_dir: {}", install_dir.display());
+    log::info!("RAMPP starting — install_dir: {}", install_dir.display());
 
-    // Ensure ramp.toml exists
+    // Ensure rampp.toml exists
     if let Err(e) = write_default_config(&install_dir) {
         fatal(&format!("cannot write default config: {e}"));
     }
@@ -51,7 +51,7 @@ fn main() {
     // Load and validate config
     let config = match load_config(&install_dir) {
         Ok(c) => c,
-        Err(e) => fatal(&format!("invalid ramp.toml: {e}")),
+        Err(e) => fatal(&format!("invalid rampp.toml: {e}")),
     };
 
     // --- Startup provisioning (idempotent, safe to run every launch) ------
@@ -133,7 +133,7 @@ fn main() {
             }
             // Persist the force-disabled state so it survives restart
             // NOTE: must be kept in sync with do_persist in executor.rs
-            let state_path = install_dir.join("ramp.state");
+            let state_path = install_dir.join("rampp.state");
             let p = PersistedState {
                 phpmyadmin_enabled: false,
                 ..persisted.clone()
@@ -148,7 +148,7 @@ fn main() {
             }
         } else if persisted.phpmyadmin_enabled && phpmyadmin_dir_exists {
             app_state.phpmyadmin_enabled = true;
-            // Ensure config.inc.php exists or is regenerated if RAMP-owned. Without
+            // Ensure config.inc.php exists or is regenerated if RAMPP-owned. Without
             // it, phpMyAdmin falls back to built-in defaults (no AllowNoPassword)
             // and rejects login with "Login without a password is forbidden".
             let config_inc = phpmyadmin_dir.join("config.inc.php");
@@ -172,7 +172,7 @@ fn main() {
                     log::error!("Failed to write phpMyAdmin config.inc.php: {e}");
                 } else if persisted.phpmyadmin_blowfish_secret.is_none() {
                     // Persist the freshly-generated secret so subsequent runs reuse it
-                    let state_path = install_dir.join("ramp.state");
+                    let state_path = install_dir.join("rampp.state");
                     let p = PersistedState {
                         phpmyadmin_blowfish_secret: Some(secret),
                         ..persisted.clone()
@@ -310,7 +310,7 @@ fn main() {
     // egui must run on the main thread (Windows GUI requirement)
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("RAMP")
+            .with_title("RAMPP")
             .with_inner_size([520.0, 480.0])
             .with_min_inner_size([400.0, 300.0])
             .with_visible(true),
@@ -318,7 +318,7 @@ fn main() {
     };
 
     eframe::run_native(
-        "RAMP",
+        "RAMPP",
         native_options,
         Box::new(|_cc| {
             Box::new(ui::RampApp::new(shared_state, tx, log_for_ui, show_rx))
@@ -358,7 +358,7 @@ fn create_runtime_dirs(cfg: &crate::state::RampConfig) -> Result<(), String> {
 }
 
 fn load_persisted_state(install_dir: &std::path::Path) -> PersistedState {
-    let path = install_dir.join("ramp.state");
+    let path = install_dir.join("rampp.state");
     std::fs::read(&path)
         .ok()
         .and_then(|data| serde_json::from_slice(&data).ok())
@@ -378,7 +378,7 @@ fn debounce_key(event: &Event) -> Option<String> {
 /// Safe to call before the egui window exists and with windows_subsystem = "windows".
 fn fatal(msg: &str) -> ! {
     log::error!("{msg}");
-    let title: Vec<u16> = "RAMP — Fatal Error\0".encode_utf16().collect();
+    let title: Vec<u16> = "RAMPP — Fatal Error\0".encode_utf16().collect();
     let mut body: Vec<u16> = msg.encode_utf16().collect();
     body.push(0);
     unsafe {

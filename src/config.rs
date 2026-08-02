@@ -60,22 +60,22 @@ impl Default for TomlPhpMyAdmin {
     }
 }
 
-/// Load and validate ramp.toml from install_dir.
+/// Load and validate rampp.toml from install_dir.
 pub fn load_config(install_dir: &Path) -> Result<RampConfig, String> {
     let paths = InstallPaths::from_install_dir(install_dir)?;
 
-    // Reject ramp.toml if it is a symlink — it could redirect config reads/writes
+    // Reject rampp.toml if it is a symlink — it could redirect config reads/writes
     // to a system file, enabling privilege escalation or config escapes.
     validate_critical_path(&paths.config, install_dir, false)
-        .map_err(|e| format!("ramp.toml path rejected: {e}"))?;
+        .map_err(|e| format!("rampp.toml path rejected: {e}"))?;
 
     let raw = std::fs::read_to_string(&paths.config)
-        .map_err(|e| format!("cannot read ramp.toml: {e}"))?;
-    let doc: TomlRoot = toml::from_str(&raw).map_err(|e| format!("ramp.toml parse error: {e}"))?;
+        .map_err(|e| format!("cannot read rampp.toml: {e}"))?;
+    let doc: TomlRoot = toml::from_str(&raw).map_err(|e| format!("rampp.toml parse error: {e}"))?;
     validate_and_build(doc, install_dir)
 }
 
-/// Write a default ramp.toml if none exists. Does not overwrite.
+/// Write a default rampp.toml if none exists. Does not overwrite.
 pub fn write_default_config(install_dir: &Path) -> Result<(), String> {
     let paths = InstallPaths::from_install_dir(install_dir)?;
     if paths.config.exists() {
@@ -98,7 +98,7 @@ port = 9000
     atomic_write(&paths.config, default.as_bytes())
 }
 
-/// Serialize the current config back to ramp.toml (atomic write). Preserves all
+/// Serialize the current config back to rampp.toml (atomic write). Preserves all
 /// known fields (ports, phpMyAdmin credentials) and writes the document_root.
 pub fn write_config(cfg: &RampConfig) -> Result<(), String> {
     let paths = InstallPaths::from_install_dir(&cfg.install_dir)?;
@@ -209,7 +209,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_toml(dir: &Path, content: &str) {
-        std::fs::write(dir.join("ramp.toml"), content).unwrap();
+        std::fs::write(dir.join("rampp.toml"), content).unwrap();
     }
 
     #[test]
@@ -338,16 +338,16 @@ port = 9000
     fn write_default_does_not_overwrite_existing() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        std::fs::write(dir.join("ramp.toml"), b"original").unwrap();
+        std::fs::write(dir.join("rampp.toml"), b"original").unwrap();
         write_default_config(dir).unwrap();
-        assert_eq!(std::fs::read(dir.join("ramp.toml")).unwrap(), b"original");
+        assert_eq!(std::fs::read(dir.join("rampp.toml")).unwrap(), b"original");
     }
 
     #[test]
     fn rejects_malformed_toml() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        std::fs::write(dir.join("ramp.toml"), b"[not valid toml @@@").unwrap();
+        std::fs::write(dir.join("rampp.toml"), b"[not valid toml @@@").unwrap();
         let err = load_config(dir).unwrap_err();
         assert!(
             err.contains("parse error") || err.contains("TOML") || err.contains("toml"),
@@ -360,7 +360,7 @@ port = 9000
         let tmp = TempDir::new().unwrap();
         let err = load_config(tmp.path()).unwrap_err();
         assert!(
-            err.contains("cannot read") || err.contains("ramp.toml"),
+            err.contains("cannot read") || err.contains("rampp.toml"),
             "expected missing file message, got: {err}"
         );
     }

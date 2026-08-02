@@ -5,7 +5,7 @@ pub fn generate_phpmyadmin_apache_conf(install_dir: &std::path::Path, php_port: 
     let pma_dir_s = pma_dir.display().to_string().replace('\\', "/");
 
     format!(
-        r#"# RAMP — phpMyAdmin enabled (do not remove this line)
+        r#"# RAMPP — phpMyAdmin enabled (do not remove this line)
 #
 # Alias maps /phpmyadmin/ → the phpMyAdmin install directory. Apache's normal
 # URI-to-filename translation produces an absolute Windows path (C:/.../index.php).
@@ -44,7 +44,7 @@ pub fn generate_config_inc_php(
         .replace('\\', "/");
     format!(
         r#"<?php
-// RAMP — generated config.inc.php (do not remove this line — RAMP uses it to detect generated configs)
+// RAMPP — generated config.inc.php (do not remove this line — RAMPP uses it to detect generated configs)
 $cfg['blowfish_secret'] = '{blowfish_secret}';
 $cfg['Servers'][1]['auth_type'] = 'config';
 $cfg['Servers'][1]['host'] = '127.0.0.1';
@@ -63,7 +63,7 @@ pub fn is_ramp_owned_config(path: &std::path::Path) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
         return false;
     };
-    content.contains("RAMP — generated config.inc.php")
+    content.contains("RAMPP — generated config.inc.php")
 }
 
 pub fn generate_blowfish_secret(install_dir: &std::path::Path) -> String {
@@ -212,7 +212,7 @@ mod tests {
             "",
             "secret12345678901234567890123456",
         );
-        assert!(php.contains("RAMP — generated config.inc.php"));
+        assert!(php.contains("RAMPP — generated config.inc.php"));
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
     fn is_ramp_owned_config_true_when_marker_present() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.inc.php");
-        std::fs::write(&path, "<?php\n// RAMP — generated config.inc.php (do not remove this line — RAMP uses it to detect generated configs)\n").unwrap();
+        std::fs::write(&path, "<?php\n// RAMPP — generated config.inc.php (do not remove this line — RAMPP uses it to detect generated configs)\n").unwrap();
         assert!(is_ramp_owned_config(&path));
     }
 

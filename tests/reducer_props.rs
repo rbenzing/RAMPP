@@ -17,23 +17,23 @@ use std::path::PathBuf;
 
 fn make_base_state() -> AppState {
     AppState::new(RampConfig {
-        install_dir: PathBuf::from("C:\\ramp"),
+        install_dir: PathBuf::from("C:\\rampp"),
         apache: ApacheConfig {
             port: 8080,
-            bin: PathBuf::from("C:\\ramp\\apache\\bin\\httpd.exe"),
-            conf: PathBuf::from("C:\\ramp\\apache\\conf\\httpd.conf"),
-            document_root: PathBuf::from("C:\\ramp\\apache\\htdocs"),
+            bin: PathBuf::from("C:\\rampp\\apache\\bin\\httpd.exe"),
+            conf: PathBuf::from("C:\\rampp\\apache\\conf\\httpd.conf"),
+            document_root: PathBuf::from("C:\\rampp\\apache\\htdocs"),
         },
         mysql: MysqlConfig {
             port: 3306,
-            bin: PathBuf::from("C:\\ramp\\mysql\\bin\\mysqld.exe"),
-            data_dir: PathBuf::from("C:\\ramp\\mysql\\data"),
-            ini: PathBuf::from("C:\\ramp\\mysql\\my.ini"),
+            bin: PathBuf::from("C:\\rampp\\mysql\\bin\\mysqld.exe"),
+            data_dir: PathBuf::from("C:\\rampp\\mysql\\data"),
+            ini: PathBuf::from("C:\\rampp\\mysql\\my.ini"),
         },
         php: PhpConfig {
             port: 9000,
-            bin: PathBuf::from("C:\\ramp\\php\\php-cgi.exe"),
-            ini: PathBuf::from("C:\\ramp\\php\\php.ini"),
+            bin: PathBuf::from("C:\\rampp\\php\\php-cgi.exe"),
+            ini: PathBuf::from("C:\\rampp\\php\\php.ini"),
         },
         phpmyadmin: PhpMyAdminConfig {
             mysql_user: "root".to_string(),

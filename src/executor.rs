@@ -15,7 +15,7 @@ struct ServiceHandles {
     /// Channel to signal the watcher thread to force-kill the process.
     kill_tx: crossbeam_channel::Sender<()>,
     /// Join handle for the watcher thread — used during graceful shutdown to
-    /// block until the process is confirmed dead before RAMP exits.
+    /// block until the process is confirmed dead before RAMPP exits.
     watcher_join: Option<std::thread::JoinHandle<()>>,
     /// Channel to stop the health checker.
     health_stop_tx: Option<crossbeam_channel::Sender<()>>,
@@ -226,7 +226,7 @@ impl Executor {
     }
 
     fn do_persist(&self, state: &AppState) {
-        let state_path = self.config.install_dir.join("ramp.state");
+        let state_path = self.config.install_dir.join("rampp.state");
         // Preserve blowfish_secret from the existing state file so it survives PersistDesiredState calls
         let existing_secret = std::fs::read(&state_path)
             .ok()
@@ -352,7 +352,7 @@ impl Executor {
     }
 
     fn load_or_generate_blowfish_secret(&self) -> String {
-        let state_path = self.config.install_dir.join("ramp.state");
+        let state_path = self.config.install_dir.join("rampp.state");
         if let Ok(data) = std::fs::read(&state_path) {
             if let Ok(persisted) = serde_json::from_slice::<PersistedState>(&data) {
                 if let Some(secret) = persisted.phpmyadmin_blowfish_secret {
@@ -377,7 +377,7 @@ impl Executor {
     /// health checkers, then join every watcher thread — blocking until each managed
     /// process is confirmed dead. Called by the event loop after processing ShutdownAll.
     ///
-    /// This guarantees no orphaned processes remain when RAMP exits. The caller should
+    /// This guarantees no orphaned processes remain when RAMPP exits. The caller should
     /// enforce an external timeout (SHUTDOWN_GRACE_PERIOD) as a safety net.
     pub fn shutdown_and_join(&mut self) {
         // Signal every health checker to stop first so it doesn't send events
@@ -420,7 +420,7 @@ impl Executor {
 /// waiting for the next 100ms poll interval.
 ///
 /// `error_log`: if provided, the tail of this file is emitted as a LogEvent on non-zero exit
-/// so crash reasons are visible without leaving the RAMP UI.
+/// so crash reasons are visible without leaving the RAMPP UI.
 fn watcher(
     proc: ServiceProcess,
     tx: Sender<Event>,

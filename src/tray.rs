@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 use tray_item::{IconSource, TrayItem};
 
 pub fn run_tray(tx: Sender<Event>, show_window_tx: crossbeam_channel::Sender<()>) {
-    let mut tray = match TrayItem::new("RAMP", IconSource::Resource("icon")) {
+    let mut tray = match TrayItem::new("RAMPP", IconSource::Resource("icon")) {
         Ok(t) => t,
         Err(e) => {
             log::error!("failed to create system tray: {e}");
@@ -13,10 +13,10 @@ pub fn run_tray(tx: Sender<Event>, show_window_tx: crossbeam_channel::Sender<()>
     };
 
     let show_tx = show_window_tx.clone();
-    tray.add_menu_item("Open RAMP", move || {
+    tray.add_menu_item("Open RAMPP", move || {
         let _ = show_tx.send(());
     })
-    .unwrap_or_else(|e| log::warn!("tray: could not add 'Open RAMP' item: {e}"));
+    .unwrap_or_else(|e| log::warn!("tray: could not add 'Open RAMPP' item: {e}"));
 
     tray.add_label("─────────────")
         .unwrap_or_else(|e| log::warn!("tray: could not add separator: {e}"));

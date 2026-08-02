@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 /// Check if Apache is ready.
 ///
 /// Probes `HEALTH_ENDPOINT_PATH`, which the generated httpd.conf aliases to a
-/// RAMP-owned static file outside the DocumentRoot (see `apache_conf`). That keeps
+/// RAMPP-owned static file outside the DocumentRoot (see `apache_conf`). That keeps
 /// the probe a plain file read: it never reaches `mod_proxy_fcgi`, so it does not
 /// hang when PHP-CGI is down and does not depend on the user's application booting.
 ///

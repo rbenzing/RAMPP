@@ -1,6 +1,6 @@
 use crate::state::RampConfig;
 
-/// Generate a minimal php.ini for PHP-CGI running under RAMP.
+/// Generate a minimal php.ini for PHP-CGI running under RAMPP.
 /// Only called when the file does not already exist.
 pub fn generate_php_ini(cfg: &RampConfig) -> String {
     let php_dir = cfg.install_dir.join("php");
@@ -21,7 +21,7 @@ pub fn generate_php_ini(cfg: &RampConfig) -> String {
         .replace('\\', "/");
 
     format!(
-        r#"; RAMP — generated php.ini
+        r#"; RAMPP — generated php.ini
 [PHP]
 engine = On
 short_open_tag = Off

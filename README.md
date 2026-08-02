@@ -110,7 +110,7 @@ Run `vc_redist.x64.exe` if you haven't already.
 
 Double-click `rampp.exe`. On first launch RAMPP will:
 
-1. Generate `ramp.toml` (ports 80 + 3306 + 9000)
+1. Generate `rampp.toml` (ports 80 + 3306 + 9000)
 2. Create `apache\conf\httpd.conf`, `apache\htdocs\index.php`, `mysql\my.ini`, `php\php.ini`
 3. Run `mysqld --initialize-insecure` (~10–20 s, once only)
 4. Show the system tray icon and status window
@@ -121,10 +121,10 @@ Click **Start All** to bring up all three services. Apache will be at `http://12
 
 ## ⚙️ Configuration
 
-Edit `C:\rampp\ramp.toml` to change ports:
+Edit `C:\rampp\rampp.toml` to change ports:
 
 ```toml
-install_dir = "C:\\rampp"
+install_dir = "C:\\ramppp"
 
 [apache]
 port = 80
@@ -158,7 +158,7 @@ STATE + EVENT → NEW STATE + SIDE EFFECTS
 | I/O | `executor.rs` | Translates `SideEffect`s into process ops and threads |
 | Processes | `process.rs` | Windows Job Object spawn/kill |
 | Health | `health.rs` | Apache HTTP + MySQL TCP + PHP TCP readiness and health checks |
-| Config | `config.rs` | `ramp.toml` load/validate + atomic write |
+| Config | `config.rs` | `rampp.toml` load/validate + atomic write |
 | Paths | `paths.rs` | Install-dir contract, traversal rejection, symlink rejection |
 | Log | `logger.rs` | Bounded ring buffer (1 000 lines) |
 | Apache conf | `apache_conf.rs` | Generate `httpd.conf` with PHP FastCGI proxy |

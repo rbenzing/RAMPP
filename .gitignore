@@ -9,8 +9,8 @@
 /sources/
 
 # Runtime state files
-ramp.state
-ramp.toml
+rampp.state
+rampp.toml
 
 # Build artifacts
 *.pdb
