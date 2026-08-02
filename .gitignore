@@ -14,3 +14,11 @@ ramp.toml
 
 # Build artifacts
 *.pdb
+
+# superpowers
+/docs/superpowers
+/docs/plans
+
+.claude/*
+!.claude/CLAUDE.md
+!.claude/AGENTS.md
