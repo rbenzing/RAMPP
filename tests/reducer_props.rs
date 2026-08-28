@@ -71,9 +71,15 @@ fn arb_desired() -> impl Strategy<Value = DesiredServiceState> {
 /// Ports plausible enough to collide with a live assignment, rather than almost
 /// certainly missing and only ever exercising `PortUnavailable`'s stale-report
 /// branch. Spans each service's home port through its scan range under
-/// `make_base_state()`'s default (disjoint) config — apache 8080..=8100, mysql
-/// 3306..=3326, php 9000..=9020 — so a generated port has a real chance of
-/// matching whichever service's live in-flight assignment is current.
+/// `make_base_state()`'s *default* (disjoint) config — apache 8080..=8100,
+/// mysql 3306..=3326, php 9000..=9020. This is shared by every property that
+/// draws events from `arb_event()`. A property that overrides the config to
+/// something else (e.g. `no_two_services_ever_share_an_assigned_port`, which
+/// puts apache and mysql on the same home port) will find the sub-ranges that
+/// don't match its overridden config are dead weight for its own purposes —
+/// those `PortUnavailable` events just land on ports nothing is ever assigned
+/// to and get treated as stale, harmless no-ops. That's expected: this helper
+/// is calibrated for the shared default config, not tailored per property.
 fn arb_port() -> impl Strategy<Value = u16> {
     prop_oneof![8080u16..=8100, 3306u16..=3326, 9000u16..=9020]
 }
@@ -281,34 +287,33 @@ proptest! {
         }
     }
 
-    /// The invariant the whole reducer-owned port ledger exists to guarantee: no
-    /// two services ever hold the same assigned port.
+    /// An edge-case stress test of the port ledger, *not* a scenario a live
+    /// system can reach: apache and mysql are configured with the exact same
+    /// home port (8080). `src/config.rs`'s validation rejects any real
+    /// `rampp.toml` where two services share a port, so this state can only
+    /// arise from a hand-built `AppState` like this one — but the reducer must
+    /// still never let it produce two services holding the same assigned
+    /// port, and this is a cheap, reliable way to hammer that.
     ///
-    /// Configured with apache and mysql sharing the exact same configured home
-    /// port (8080) — not just nearby ports — rather than `make_base_state()`'s
-    /// default disjoint ports. This matters: an earlier draft only spaced the
-    /// three home ports a few ports apart within overlapping 20-port scan
-    /// ranges (8080/8085/8090). That was still vacuous in practice, because with
-    /// distinct home ports every service's *first* allocation attempt lands on
-    /// its own home port (offset 0) without ever consulting another service's
-    /// candidates — a collision could only emerge after several consecutive,
-    /// exact-port-matching `PortUnavailable` events walked one service's scan
-    /// deep enough to reach another's territory, which is astronomically
-    /// unlikely for `arb_event()`'s uniformly-random port field to produce
-    /// several times in a row for the same service. Confirmed empirically: with
-    /// `allocate_port`'s `taken_by_other` guard deliberately disabled, that
-    /// draft still passed every run. Sharing a home port instead makes the
-    /// collision reachable on the very first `StartService` for each of the two
-    /// services — no drift required — so the property actually exercises the
-    /// guard. Re-confirmed the same way: disabling `taken_by_other` now reliably
-    /// fails this property (see the task report for the exact run).
+    /// With both home ports identical, `allocate_port`'s `taken_by_other`
+    /// check has real work to do from the very first `StartService` for each
+    /// service: whichever starts first is pushed off offset 0 (and usually
+    /// offset 1) by the *other's configured* port, and the *other's assigned*
+    /// port becomes the clause that matters once both are competing for
+    /// offset 2 onward — no drift needed, so the collision is reachable with
+    /// high probability on almost every generated event sequence. See
+    /// `drifting_into_another_services_territory_never_collides` below for the
+    /// complementary, config-valid scenario this one does not cover: distinct
+    /// home ports whose scan ranges merely overlap, colliding only through
+    /// `PortUnavailable`-driven drift.
     #[test]
     fn no_two_services_ever_share_an_assigned_port(
         events in prop::collection::vec(arb_event(), 0..60),
     ) {
         let mut state = make_base_state();
         state.config.apache.port = 8080;
-        state.config.mysql.port = 8080; // deliberately identical to apache's
+        state.config.mysql.port = 8080; // deliberately identical to apache's —
+        // config.rs would reject this in a real rampp.toml; see the docs above.
         state.config.php.port = 8081;
         for event in events {
             let (next, _) = reducer(state, event);
@@ -324,6 +329,78 @@ proptest! {
                 assigned.len(),
                 unique.len(),
                 "two services hold the same port: {:?}",
+                assigned
+            );
+        }
+    }
+
+    /// The realistic counterpart to `no_two_services_ever_share_an_assigned_port`
+    /// above: apache and php are given *distinct*, config-valid home ports
+    /// (`src/config.rs` would accept this — unlike the identical-port scenario
+    /// above) whose 20-port scan ranges nonetheless overlap. A live system can
+    /// only produce a collision here the way it actually would in production:
+    /// one service's port getting reported unavailable over and over — real
+    /// bind failures, one per retry — walks its assignment forward until it
+    /// lands squarely on a port the other service already holds.
+    ///
+    /// Drives that drift deterministically, the same technique
+    /// `a_start_attempt_never_exceeds_the_scan_range` uses (feed
+    /// `PortUnavailable` the service's own currently-assigned, in-flight port,
+    /// over and over), rather than hoping `arb_event()`'s independent random
+    /// port field stumbles into it. It doesn't: the first draft of the
+    /// property above used exactly this overlapping-but-distinct setup
+    /// (apache 8080, mysql 8085, php 8090) and relied on random events alone,
+    /// and with `allocate_port`'s `taken_by_other` guard deliberately
+    /// disabled, that draft still passed every run — the odds of a random
+    /// port field matching a service's live assignment several times in a row
+    /// are negligible. Forcing the drift explicitly is what makes this
+    /// version actually reach the collision-eligible state.
+    #[test]
+    fn drifting_into_another_services_territory_never_collides(gap in 1u16..=PORT_SCAN_RANGE) {
+        let mut state = make_base_state();
+        state.config.apache.port = 8080;
+        state.config.php.port = 8080 + gap; // distinct, config-valid, within
+        // apache's scan range. mysql stays at its default 3306 — far enough
+        // away to stay uninvolved.
+
+        // Php starts first and settles on its home port: a real, already-
+        // running service holding a port that sits squarely in apache's
+        // future scan path.
+        let (state1, _) = reducer(state, Event::StartService(Service::Php));
+        state = state1;
+        prop_assert_eq!(state.ports.assigned(Service::Php), Some(8080 + gap));
+
+        // Apache starts and gets its own home port cleanly (php isn't there yet).
+        let (state2, _) = reducer(state, Event::StartService(Service::Apache));
+        state = state2;
+        prop_assert_eq!(state.ports.assigned(Service::Apache), Some(8080));
+
+        // Walk apache's assignment forward one blacklisted port at a time —
+        // exactly what a real client sees on repeated bind failures — until
+        // its candidate reaches php's live port.
+        for _ in 0..gap {
+            let Some(port) = state.ports.assigned(Service::Apache) else {
+                break;
+            };
+            let (next, _) = reducer(
+                state,
+                Event::PortUnavailable {
+                    service: Service::Apache,
+                    port,
+                },
+            );
+            state = next;
+            let assigned: Vec<u16> = [Service::Apache, Service::Mysql, Service::Php]
+                .into_iter()
+                .filter_map(|s| state.ports.assigned(s))
+                .collect();
+            let mut unique = assigned.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            prop_assert_eq!(
+                assigned.len(),
+                unique.len(),
+                "apache's drift collided with php's territory: {:?}",
                 assigned
             );
         }
