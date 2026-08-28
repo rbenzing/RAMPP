@@ -240,7 +240,6 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
 
 /// Read `rampp.state`, falling back to the all-stopped default when the file is
 /// absent or unparsable. Never fails — a missing state file is a normal first run.
-#[allow(dead_code)]
 pub fn read_persisted_state(path: &Path) -> crate::state::PersistedState {
     std::fs::read(path)
         .ok()
@@ -249,7 +248,6 @@ pub fn read_persisted_state(path: &Path) -> crate::state::PersistedState {
 }
 
 /// Persist `rampp.state` atomically.
-#[allow(dead_code)]
 pub fn write_persisted_state(
     path: &Path,
     state: &crate::state::PersistedState,

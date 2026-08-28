@@ -158,9 +158,7 @@ fn main() {
                 let secret = persisted
                     .phpmyadmin_blowfish_secret
                     .clone()
-                    .unwrap_or_else(|| {
-                        phpmyadmin_conf::generate_blowfish_secret(&config.install_dir)
-                    });
+                    .unwrap_or_else(phpmyadmin_conf::generate_blowfish_secret);
                 let content = phpmyadmin_conf::generate_config_inc_php(
                     &config.install_dir,
                     config.mysql.port,

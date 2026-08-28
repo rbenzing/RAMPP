@@ -353,22 +353,14 @@ impl Executor {
 
     fn load_or_generate_blowfish_secret(&self) -> String {
         let state_path = self.config.install_dir.join("rampp.state");
-        if let Ok(data) = std::fs::read(&state_path) {
-            if let Ok(persisted) = serde_json::from_slice::<PersistedState>(&data) {
-                if let Some(secret) = persisted.phpmyadmin_blowfish_secret {
-                    return secret;
-                }
-            }
+        let mut persisted = crate::config::read_persisted_state(&state_path);
+        if let Some(secret) = persisted.phpmyadmin_blowfish_secret.clone() {
+            return secret;
         }
-        // Generate a fresh secret and persist it immediately
-        let secret = phpmyadmin_conf::generate_blowfish_secret(&self.config.install_dir);
-        if let Ok(data) = std::fs::read(&state_path) {
-            if let Ok(mut persisted) = serde_json::from_slice::<PersistedState>(&data) {
-                persisted.phpmyadmin_blowfish_secret = Some(secret.clone());
-                if let Ok(json) = serde_json::to_vec_pretty(&persisted) {
-                    let _ = atomic_write(&state_path, &json);
-                }
-            }
+        let secret = phpmyadmin_conf::generate_blowfish_secret();
+        persisted.phpmyadmin_blowfish_secret = Some(secret.clone());
+        if let Err(e) = crate::config::write_persisted_state(&state_path, &persisted) {
+            log::error!("cannot persist phpMyAdmin blowfish secret: {e}");
         }
         secret
     }
@@ -472,4 +464,73 @@ fn read_log_tail(path: &std::path::Path, max_lines: usize) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     Some(lines[start..].join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{ApacheConfig, MysqlConfig, PhpConfig, PhpMyAdminConfig};
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn test_cfg(dir: &Path) -> RampConfig {
+        RampConfig {
+            install_dir: dir.to_path_buf(),
+            apache: ApacheConfig {
+                port: 8080,
+                bin: dir.join("apache").join("bin").join("httpd.exe"),
+                conf: dir.join("apache").join("conf").join("httpd.conf"),
+                document_root: dir.join("apache").join("htdocs"),
+            },
+            mysql: MysqlConfig {
+                port: 3306,
+                bin: dir.join("mysql").join("bin").join("mysqld.exe"),
+                data_dir: dir.join("mysql").join("data"),
+                ini: dir.join("mysql").join("my.ini"),
+            },
+            php: PhpConfig {
+                port: 9000,
+                bin: dir.join("php").join("php-cgi.exe"),
+                ini: dir.join("php").join("php.ini"),
+            },
+            phpmyadmin: PhpMyAdminConfig {
+                mysql_user: "root".to_string(),
+                mysql_password: String::new(),
+            },
+        }
+    }
+
+    /// Ruling F: `load_or_generate_blowfish_secret` must persist the secret it
+    /// generates even when `rampp.state` does not exist yet. The old
+    /// implementation nested the persist inside `if let Ok(data) =
+    /// fs::read(&state_path)`, so a missing state file meant the freshly
+    /// generated secret was silently dropped and a new one was generated on
+    /// every call.
+    #[test]
+    fn blowfish_secret_persists_when_state_file_did_not_previously_exist() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let state_path = tmp.path().join("rampp.state");
+        assert!(!state_path.exists(), "precondition: no state file yet");
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let executor = Executor::new(cfg, tx, log);
+
+        let first = executor.load_or_generate_blowfish_secret();
+        assert!(
+            state_path.exists(),
+            "generating a secret must create rampp.state, not just return a value"
+        );
+
+        let second = executor.load_or_generate_blowfish_secret();
+        assert_eq!(
+            first, second,
+            "secret must be reused on the next call, not regenerated"
+        );
+
+        // Confirm it actually landed on disk under the field the toggle-on path reads.
+        let persisted = crate::config::read_persisted_state(&state_path);
+        assert_eq!(persisted.phpmyadmin_blowfish_secret, Some(first));
+    }
 }
