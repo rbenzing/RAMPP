@@ -195,14 +195,6 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     )));
                 }
             }
-            // Auto-disable phpMyAdmin only on unexpected exit (crash), not intentional stop.
-            // desired == Stopped means the user stopped the service deliberately; phpMyAdmin
-            // state is preserved so it resumes when the service comes back up.
-            let is_crash = state.service(svc).desired == DesiredServiceState::Running;
-            if state.phpmyadmin_enabled && is_crash && matches!(svc, Service::Mysql | Service::Php)
-            {
-                effects.push(SideEffect::TogglePhpMyAdmin(false));
-            }
         }
 
         Event::ProcessSpawnFailed {
@@ -458,11 +450,25 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
 
         Event::PhpMyAdminToggled(enabled) => {
             state.phpmyadmin_enabled = enabled;
+            if !enabled {
+                // The toggle failed or was turned off — do not open a browser later.
+                state.open_phpmyadmin_on_apache_ready = false;
+            }
             effects.push(SideEffect::PersistDesiredState);
             effects.push(SideEffect::LogEvent(format!(
                 "phpMyAdmin: {}",
                 if enabled { "enabled" } else { "disabled" }
             )));
+        }
+
+        Event::PhpMyAdminDirChanged(exists) => {
+            state.phpmyadmin_dir_exists = exists;
+            if !exists && state.phpmyadmin_enabled {
+                effects.push(SideEffect::LogEvent(
+                    "phpMyAdmin: directory disappeared — disabling".to_string(),
+                ));
+                effects.push(SideEffect::TogglePhpMyAdmin(false));
+            }
         }
 
         // ── Diagnostic log lines from background threads ──────────────────────
@@ -1351,34 +1357,78 @@ mod tests {
     }
 
     #[test]
-    fn mysql_crash_while_phpmyadmin_enabled_emits_toggle_off() {
-        // desired=Running → unexpected exit → auto-disable
-        let mut state = make_state_all_running();
+    fn a_deliberate_mysql_restart_does_not_disable_phpmyadmin() {
+        let mut state = make_state();
         state.phpmyadmin_enabled = true;
-        let (_, effects) = reducer(
+        state.phpmyadmin_dir_exists = true;
+        state.mysql.state = ServiceState::Running;
+        let (state, _) = reducer(state, Event::RestartService(Service::Mysql));
+        let (state, effects) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Mysql,
+                exit_code: Some(0),
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(false))),
+            "an intentional restart is not a crash"
+        );
+        assert!(state.phpmyadmin_enabled);
+    }
+
+    #[test]
+    fn a_mysql_crash_leaves_phpmyadmin_enabled() {
+        let mut state = make_state();
+        state.phpmyadmin_enabled = true;
+        state.phpmyadmin_dir_exists = true;
+        state.mysql.state = ServiceState::Running;
+        state.mysql.desired = DesiredServiceState::Running;
+        let (state, effects) = reducer(
             state,
             Event::ProcessExit {
                 service: Service::Mysql,
                 exit_code: Some(1),
             },
         );
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(false))));
+        assert_eq!(state.mysql.state, ServiceState::Crashed);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(_))),
+            "auto-retry recovers; disabling forced a manual re-toggle and an Apache restart per retry"
+        );
+        assert!(state.phpmyadmin_enabled);
     }
 
     #[test]
-    fn php_crash_while_phpmyadmin_enabled_emits_toggle_off() {
-        // desired=Running → unexpected exit → auto-disable
-        let mut state = make_state_all_running();
-        state.phpmyadmin_enabled = true;
-        let (_, effects) = reducer(
-            state,
-            Event::ProcessExit {
-                service: Service::Php,
-                exit_code: Some(1),
-            },
+    fn a_failed_toggle_clears_the_pending_browser_open() {
+        let mut state = make_state();
+        state.open_phpmyadmin_on_apache_ready = true;
+        let (state, _) = reducer(state, Event::PhpMyAdminToggled(false));
+        assert!(
+            !state.open_phpmyadmin_on_apache_ready,
+            "must not later open a browser at a phpMyAdmin that was never enabled"
         );
+    }
+
+    #[test]
+    fn phpmyadmin_dir_appearing_at_runtime_enables_the_toggle() {
+        let mut state = make_state();
+        state.phpmyadmin_dir_exists = false;
+        let (state, _) = reducer(state, Event::PhpMyAdminDirChanged(true));
+        assert!(state.phpmyadmin_dir_exists);
+    }
+
+    #[test]
+    fn phpmyadmin_dir_disappearing_disables_it() {
+        let mut state = make_state();
+        state.phpmyadmin_dir_exists = true;
+        state.phpmyadmin_enabled = true;
+        let (state, effects) = reducer(state, Event::PhpMyAdminDirChanged(false));
+        assert!(!state.phpmyadmin_dir_exists);
         assert!(effects
             .iter()
             .any(|e| matches!(e, SideEffect::TogglePhpMyAdmin(false))));

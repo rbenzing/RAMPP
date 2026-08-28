@@ -177,6 +177,9 @@ fn main() {
     let config_for_executor = config.clone();
     let log_for_loop = log.clone();
     let tx_for_loop = tx.clone();
+    // Bound before the closure moves config_for_executor (which Executor::new consumes),
+    // so the Tick handler below can still probe the phpmyadmin directory each cycle.
+    let pma_probe_dir = config.install_dir.join("phpmyadmin");
     std::thread::spawn(move || {
         let mut state = app_state;
         let mut executor = Executor::new(config_for_executor, tx_for_loop.clone(), log_for_loop);
@@ -207,6 +210,13 @@ fn main() {
             let apache_was = state.apache.state;
             let mysql_was = state.mysql.state;
             let php_was = state.php.state;
+
+            if matches!(event, Event::Tick) {
+                let exists = pma_probe_dir.is_dir();
+                if exists != state.phpmyadmin_dir_exists {
+                    let _ = tx_for_loop.send(Event::PhpMyAdminDirChanged(exists));
+                }
+            }
 
             let (new_state, effects) = reducer(state, event);
             state = new_state;

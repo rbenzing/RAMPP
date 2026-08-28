@@ -61,6 +61,9 @@ pub enum Event {
     TogglePhpMyAdmin,
     PhpMyAdminToggled(bool),
     OpenPhpMyAdmin,
+    /// Emitted by the event loop's Tick handler when the on-disk phpmyadmin
+    /// directory's existence differs from `state.phpmyadmin_dir_exists`.
+    PhpMyAdminDirChanged(bool),
 
     // UI actions
     ClearLog,
