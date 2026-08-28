@@ -225,13 +225,24 @@ impl Executor {
         }
     }
 
+    /// Whether a best-effort MySQL graceful shutdown should be attempted before
+    /// the Job Object close. Gated on an actual live handle — not merely on a
+    /// port being recorded in the ledger, since `do_kill` is also reached with
+    /// no MySQL process at all (a cold first start, a crash auto-retry, and a
+    /// bind-failure retry all call it to clear any stale handle before
+    /// spawning, and in every one of those cases there is nothing listening to
+    /// shut down). Pure and side-effect-free so it can be unit-tested directly.
+    fn should_attempt_graceful_stop(&self, svc: Service) -> bool {
+        svc == Service::Mysql && self.handles.contains_key(&svc)
+    }
+
     fn do_kill(&mut self, svc: Service, state: &AppState) {
         self.do_stop_health(svc);
 
         // Ask MySQL to close InnoDB cleanly first. Best-effort only: the Job
         // Object close below is unconditional and remains the termination
         // guarantee — a failed or timed-out attempt here must never skip it.
-        if svc == Service::Mysql {
+        if self.should_attempt_graceful_stop(svc) {
             if let Some(port) = state.ports.assigned(Service::Mysql) {
                 match crate::mysql_conf::graceful_shutdown(
                     &self.config,
@@ -387,18 +398,28 @@ impl Executor {
         secret
     }
 
-    /// Graceful shutdown: for every service with a live handle, attempt MySQL's
-    /// clean stop, stop its health checker, then kill and join its watcher thread —
-    /// blocking until each managed process is confirmed dead. Called by the event
-    /// loop after processing ShutdownAll.
+    /// Graceful shutdown: for every service that still has a live handle, stop
+    /// its health checker, then kill and join its watcher thread — blocking
+    /// until each managed process is confirmed dead. Called by the event loop
+    /// after processing ShutdownAll.
+    ///
+    /// In the normal case this drains an already-empty (or near-empty) map:
+    /// `ShutdownAll`'s own reducer handling emits `KillService` for every
+    /// Running/Starting service, and `execute()` processes those effects —
+    /// removing their handles via `do_kill` — before this function is ever
+    /// called. This exists as a defensive backstop for any handle that
+    /// survives that pass (e.g. a service that was mid-transition and so
+    /// wasn't Running/Starting when ShutdownAll ran), not as the primary path
+    /// for MySQL's graceful stop — that happens earlier, inside the
+    /// `KillService` handling above, if MySQL still has a handle at that point.
     ///
     /// This guarantees no orphaned processes remain when RAMPP exits. The caller should
     /// enforce an external timeout (SHUTDOWN_GRACE_PERIOD) as a safety net.
     pub fn shutdown_and_join(&mut self, state: &AppState) {
         let services: Vec<Service> = self.handles.keys().copied().collect();
         for svc in services {
-            // Reuses do_kill so app-exit gets the same best-effort MySQL graceful
-            // shutdown as a normal stop, and the same unconditional Job Object close.
+            // Reuses do_kill rather than duplicating its stop-health/kill/join
+            // sequence — harmless and keeps the two paths from drifting apart.
             self.do_kill(svc, state);
         }
     }
@@ -447,31 +468,40 @@ fn watcher(
                 // Non-blocking poll: has the process exited on its own?
                 if let Some(code) = proc.try_wait() {
                     drop(proc);
-                    let tail = read_log_tail_from(&error_log, log_offset, 20);
+                    // A zero exit is never a bind failure — e.g. MySQL logs this same
+                    // "Can't start server: Bind on TCP/IP port" signature when its X
+                    // Protocol listener (33060) collides while mysqld keeps running
+                    // normally. Diagnosing a clean exit could misroute a user-initiated
+                    // stop into PortUnavailable, which the reducer's stale-report guard
+                    // then silently drops — stranding the service in Stopping forever,
+                    // since nothing would convert it back into the ProcessExit the
+                    // reducer needs. So the whole diagnosis block is gated on code != 0.
                     if code != 0 {
+                        let tail = read_log_tail_from(&error_log, log_offset, 20);
                         if let Some(ref t) = tail {
                             let _ = tx.send(Event::DiagnosticLog(format!(
                                 "{svc}: error log tail:\n{t}"
                             )));
                         }
-                    }
-                    // A failed bind is not a crash — report it so allocation advances to the
-                    // next port rather than burning one of four retries.
-                    let diagnosis = tail
-                        .as_deref()
-                        .map(|t| crate::process::diagnose_exit(svc, t))
-                        .unwrap_or(crate::process::ExitDiagnosis::Unknown);
-                    if let crate::process::ExitDiagnosis::PortBindFailure { reserved } = diagnosis
-                    {
-                        if reserved {
-                            let _ = tx.send(Event::DiagnosticLog(format!(
-                                "{svc}: Windows refused port {port} — it is probably inside a \
-                                 reserved range. Check: netsh interface ipv4 show \
-                                 excludedportrange protocol=tcp"
-                            )));
+                        // A failed bind is not a crash — report it so allocation advances
+                        // to the next port rather than burning one of four retries.
+                        let diagnosis = tail
+                            .as_deref()
+                            .map(|t| crate::process::diagnose_exit(svc, t))
+                            .unwrap_or(crate::process::ExitDiagnosis::Unknown);
+                        if let crate::process::ExitDiagnosis::PortBindFailure { reserved } =
+                            diagnosis
+                        {
+                            if reserved {
+                                let _ = tx.send(Event::DiagnosticLog(format!(
+                                    "{svc}: Windows refused port {port} — it is probably \
+                                     inside a reserved range. Check: netsh interface ipv4 \
+                                     show excludedportrange protocol=tcp"
+                                )));
+                            }
+                            let _ = tx.send(Event::PortUnavailable { service: svc, port });
+                            return;
                         }
-                        let _ = tx.send(Event::PortUnavailable { service: svc, port });
-                        return;
                     }
                     let _ = tx.send(Event::ProcessExit {
                         service: svc,
@@ -573,5 +603,69 @@ mod tests {
         // Confirm it actually landed on disk under the field the toggle-on path reads.
         let persisted = crate::config::read_persisted_state(&state_path);
         assert_eq!(persisted.phpmyadmin_blowfish_secret, Some(first));
+    }
+
+    /// A minimal fake handle for tests that only need `handles` to be
+    /// non-empty for a service — no real process or thread is involved.
+    fn fake_handle() -> ServiceHandles {
+        let (kill_tx, _kill_rx) = crossbeam_channel::bounded::<()>(1);
+        ServiceHandles {
+            kill_tx,
+            watcher_join: None,
+            health_stop_tx: None,
+            health_join: None,
+        }
+    }
+
+    /// Review finding: `do_kill` used to gate the graceful-MySQL-shutdown
+    /// attempt on `state.ports.assigned(Mysql).is_some()`, not on whether a
+    /// MySQL process was actually running. Combined with the reducer
+    /// assigning a port before emitting `SpawnService`, and `do_spawn`'s
+    /// unconditional pre-spawn `do_kill`, that meant a cold first start, every
+    /// crash auto-retry, and every bind-failure retry all paid for a doomed
+    /// `mysqladmin shutdown` against a port nothing was listening on. The gate
+    /// must key off a live handle instead.
+    #[test]
+    fn graceful_stop_is_skipped_without_a_live_handle() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let executor = Executor::new(cfg, tx, log);
+
+        assert!(
+            !executor.should_attempt_graceful_stop(Service::Mysql),
+            "a cold start / crash retry / bind-failure retry has no live MySQL \
+             handle yet — attempting a graceful shutdown there would spawn a \
+             doomed mysqladmin against nothing"
+        );
+    }
+
+    #[test]
+    fn graceful_stop_is_attempted_with_a_live_mysql_handle_present() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let mut executor = Executor::new(cfg, tx, log);
+        executor.handles.insert(Service::Mysql, fake_handle());
+
+        assert!(executor.should_attempt_graceful_stop(Service::Mysql));
+    }
+
+    #[test]
+    fn graceful_stop_never_applies_to_non_mysql_services() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let mut executor = Executor::new(cfg, tx, log);
+        // Give both non-MySQL services a live handle too — the predicate must
+        // still say no, since only MySQL gets a graceful mysqladmin shutdown.
+        executor.handles.insert(Service::Apache, fake_handle());
+        executor.handles.insert(Service::Php, fake_handle());
+
+        assert!(!executor.should_attempt_graceful_stop(Service::Apache));
+        assert!(!executor.should_attempt_graceful_stop(Service::Php));
     }
 }
