@@ -1,13 +1,7 @@
 use crate::state::RampConfig;
 
-/// Generate a minimal php.ini for PHP-CGI running under RAMPP.
-/// Only called when the file does not already exist.
-pub fn generate_php_ini(cfg: &RampConfig) -> String {
-    generate_php_ini_with_port(cfg, cfg.mysql.port)
-}
-
-/// Same as `generate_php_ini` but with an explicit MySQL port — used by the
-/// reconciler so `mysqli.default_port` follows MySQL's real port.
+/// Generate a minimal php.ini for PHP-CGI running under RAMPP, rendered from the
+/// reducer's port ledger — `mysqli.default_port` follows MySQL's real port.
 pub fn generate_php_ini_with_port(cfg: &RampConfig, mysql_port: u16) -> String {
     let php_dir = cfg.install_dir.join("php");
     let ext_dir = php_dir.join("ext");
@@ -162,19 +156,6 @@ session.sid_bits_per_character = 5
     )
 }
 
-/// Write php.ini only if it doesn't already exist.
-pub fn ensure_php_ini(cfg: &RampConfig) -> Result<(), String> {
-    let ini_path = &cfg.php.ini;
-    if ini_path.exists() {
-        return Ok(());
-    }
-    let dir = ini_path.parent().ok_or("php.ini has no parent dir")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create php dir: {e}"))?;
-    let content = generate_php_ini(cfg);
-    crate::config::atomic_write(ini_path, content.as_bytes())
-        .map_err(|e| format!("cannot write php.ini: {e}"))
-}
-
 /// Ensure the root logs directory exists (used by PHP, Apache, and MySQL).
 pub fn ensure_php_dirs(cfg: &RampConfig) -> Result<(), String> {
     let logs_dir = cfg.install_dir.join("logs");
@@ -221,7 +202,7 @@ mod tests {
     fn generates_ini_with_mysql_port() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let ini = generate_php_ini(&cfg);
+        let ini = generate_php_ini_with_port(&cfg, cfg.mysql.port);
         assert!(ini.contains("mysqli.default_port = 3306"));
         assert!(ini.contains("expose_php = Off"));
     }
@@ -230,7 +211,7 @@ mod tests {
     fn doc_root_is_empty_for_phpmyadmin_compatibility() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let ini = generate_php_ini(&cfg);
+        let ini = generate_php_ini_with_port(&cfg, cfg.mysql.port);
         // doc_root must be empty — a non-empty value causes PHP-CGI to reject SCRIPT_FILENAME
         // paths outside it, producing "No input file specified" for phpMyAdmin.
         assert!(
@@ -243,7 +224,7 @@ mod tests {
     fn required_extensions_are_enabled() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let ini = generate_php_ini(&cfg);
+        let ini = generate_php_ini_with_port(&cfg, cfg.mysql.port);
         assert!(
             ini.contains("\nextension=mysqli\n"),
             "mysqli must be enabled for phpMyAdmin"
@@ -262,28 +243,10 @@ mod tests {
     fn output_buffering_is_off() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let ini = generate_php_ini(&cfg);
+        let ini = generate_php_ini_with_port(&cfg, cfg.mysql.port);
         assert!(
             ini.contains("\noutput_buffering = Off\n"),
             "output_buffering must be Off — numeric values cause blank pages in phpMyAdmin"
         );
-    }
-
-    #[test]
-    fn ensure_php_ini_creates_file() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        ensure_php_ini(&cfg).unwrap();
-        assert!(cfg.php.ini.exists());
-    }
-
-    #[test]
-    fn ensure_php_ini_does_not_overwrite() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        std::fs::create_dir_all(cfg.php.ini.parent().unwrap()).unwrap();
-        std::fs::write(&cfg.php.ini, b"custom").unwrap();
-        ensure_php_ini(&cfg).unwrap();
-        assert_eq!(std::fs::read(&cfg.php.ini).unwrap(), b"custom");
     }
 }

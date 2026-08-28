@@ -1,13 +1,8 @@
 use crate::state::RampConfig;
 
-/// Generate a minimal my.ini for MySQL 9.x compatible with RAMPP's layout.
-/// Only called when the file does not already exist.
-pub fn generate_my_ini(cfg: &RampConfig) -> String {
-    generate_my_ini_with_port(cfg, cfg.mysql.port)
-}
-
-/// Same as `generate_my_ini` but with an explicit port — used by the executor
-/// when the configured port was occupied and a different one was chosen.
+/// Generate a minimal my.ini for MySQL 9.x compatible with RAMPP's layout,
+/// rendered from the reducer's port ledger — the executor's `provision`
+/// reconciler is the only caller in production; the port is always explicit.
 pub fn generate_my_ini_with_port(cfg: &RampConfig, port: u16) -> String {
     let mysql_dir_path = cfg.install_dir.join("mysql");
     let mysql_dir = mysql_dir_path.display().to_string().replace('\\', "/");
@@ -49,30 +44,6 @@ port        = {port}
 default-character-set = utf8mb4
 "#
     )
-}
-
-/// Force-rewrite my.ini with an explicit port override. Used when the executor
-/// has resolved MySQL to a different port than the configured one.
-pub fn rewrite_my_ini_with_port(cfg: &RampConfig, port: u16) -> Result<(), String> {
-    let ini_path = &cfg.mysql.ini;
-    let dir = ini_path.parent().ok_or("my.ini has no parent dir")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create mysql dir: {e}"))?;
-    let content = generate_my_ini_with_port(cfg, port);
-    crate::config::atomic_write(ini_path, content.as_bytes())
-        .map_err(|e| format!("cannot rewrite my.ini: {e}"))
-}
-
-/// Write my.ini only if it doesn't already exist.
-pub fn ensure_my_ini(cfg: &RampConfig) -> Result<(), String> {
-    let ini_path = &cfg.mysql.ini;
-    if ini_path.exists() {
-        return Ok(());
-    }
-    let dir = ini_path.parent().ok_or("my.ini has no parent dir")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create mysql dir: {e}"))?;
-    let content = generate_my_ini(cfg);
-    crate::config::atomic_write(ini_path, content.as_bytes())
-        .map_err(|e| format!("cannot write my.ini: {e}"))
 }
 
 /// Run `mysqld --initialize-insecure` to set up a fresh data directory.
@@ -242,27 +213,9 @@ mod tests {
     fn generates_ini_with_correct_port() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let ini = generate_my_ini(&cfg);
+        let ini = generate_my_ini_with_port(&cfg, cfg.mysql.port);
         assert!(ini.contains("port        = 3306"));
         assert!(ini.contains("bind-address = 127.0.0.1"));
-    }
-
-    #[test]
-    fn ensure_my_ini_creates_file() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        ensure_my_ini(&cfg).unwrap();
-        assert!(cfg.mysql.ini.exists());
-    }
-
-    #[test]
-    fn ensure_my_ini_does_not_overwrite() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        std::fs::create_dir_all(cfg.mysql.ini.parent().unwrap()).unwrap();
-        std::fs::write(&cfg.mysql.ini, b"custom").unwrap();
-        ensure_my_ini(&cfg).unwrap();
-        assert_eq!(std::fs::read(&cfg.mysql.ini).unwrap(), b"custom");
     }
 
     #[test]
@@ -285,7 +238,7 @@ mod tests {
     fn my_ini_skips_name_resolution() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let ini = generate_my_ini(&cfg);
+        let ini = generate_my_ini_with_port(&cfg, cfg.mysql.port);
         assert!(
             ini.contains("skip-name-resolve"),
             "RAMPP binds loopback only; reverse DNS is pure latency and a stall source"

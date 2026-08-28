@@ -1,9 +1,7 @@
-use crate::apache_conf::rewrite_httpd_conf_with_ports;
 use crate::config::atomic_write;
 use crate::events::{Event, SideEffect};
 use crate::health::{poll_until_ready, run_health_checker};
 use crate::logger::SharedLog;
-use crate::mysql_conf::rewrite_my_ini_with_port;
 use crate::phpmyadmin_conf;
 use crate::process::{spawn_service, ServiceProcess};
 use crate::state::{AppState, PersistedState, RampConfig, Service};
@@ -92,43 +90,28 @@ impl Executor {
             return;
         }
 
-        // Always regenerate the service config file from the chosen port. This is
-        // critical: skipping the rewrite when chosen == configured leaves any stale
-        // config on disk (e.g. Listen 127.0.0.1:8081 from a previous crash-loop run)
-        // pointing at a different port than the one we'll probe for readiness, which
-        // turns into a phantom crash loop. PHP doesn't need a config rewrite — its
-        // port is a CLI flag.
-        let result = match svc {
-            Service::Apache => {
-                let php_port = state
-                    .ports
-                    .assigned(Service::Php)
-                    .unwrap_or_else(|| self.port(Service::Php));
-                rewrite_httpd_conf_with_ports(&self.config, port, php_port)
+        // A user-owned file cannot be rewritten, so a port that must move is a hard
+        // failure rather than a silent misconfiguration.
+        let configured = self.port(svc);
+        if port != configured {
+            let blocking = self.user_owned_blocking(svc);
+            if let Some(file) = blocking {
+                let _ = self.tx.send(Event::ProcessSpawnFailed {
+                    service: svc,
+                    reason: format!(
+                        "{file} is user-owned (RAMPP marker absent) and {svc} must move \
+                         from port {configured} to {port} — edit or remove the file"
+                    ),
+                });
+                return;
             }
-            Service::Mysql => rewrite_my_ini_with_port(&self.config, port),
-            Service::Php => Ok(()),
-        };
-        if let Err(reason) = result {
+        }
+        if !self.do_reconcile(state, Some(svc), state.phpmyadmin_enabled) {
             let _ = self.tx.send(Event::ProcessSpawnFailed {
                 service: svc,
-                reason: format!("config regen for port {port}: {reason}"),
+                reason: "could not write service configuration".to_string(),
             });
             return;
-        }
-
-        // If this is PHP and Apache is currently running, refresh httpd.conf so the
-        // FastCGI proxy points at PHP's chosen port. Apache stays on its current port.
-        if svc == Service::Php && self.handles.contains_key(&Service::Apache) {
-            let apache_port = state
-                .ports
-                .assigned(Service::Apache)
-                .unwrap_or_else(|| self.port(Service::Apache));
-            if let Err(reason) = rewrite_httpd_conf_with_ports(&self.config, apache_port, port) {
-                self.log.push(format!(
-                    "warn: could not refresh httpd.conf for new PHP port: {reason}"
-                ));
-            }
         }
 
         // Kill any existing handles for this service
@@ -161,6 +144,73 @@ impl Executor {
                     reason,
                 });
             }
+        }
+    }
+
+    /// Reconcile every managed config file and report what changed, so the reducer
+    /// can restart exactly the services that need it.
+    ///
+    /// `pma_enabled` is taken as a parameter rather than read from `state` because
+    /// a phpMyAdmin toggle's own reconcile pass (see `do_toggle_phpmyadmin`) runs
+    /// before the reducer has applied the toggle to `state` — `phpmyadmin_enabled`
+    /// only flips once `Event::PhpMyAdminToggled` round-trips through the event
+    /// queue, and nothing reconciles again after that. Reading `state` here would
+    /// silently reconcile against the pre-toggle value and drop the toggle.
+    fn do_reconcile(
+        &mut self,
+        state: &AppState,
+        spawning: Option<Service>,
+        pma_enabled: bool,
+    ) -> bool {
+        if let Err(e) = crate::apache_conf::ensure_health_endpoint(&self.config) {
+            self.log.push(format!("warn: health endpoint — {e}"));
+        }
+
+        let secret = self.load_or_generate_blowfish_secret();
+        let pma_dir = self.config.install_dir.join("phpmyadmin");
+        let desired = crate::provision::desired_configs(
+            &self.config,
+            &state.ports,
+            pma_enabled,
+            pma_dir.is_dir(),
+            &secret,
+        );
+        let report = crate::provision::reconcile(&desired);
+
+        for (file, err) in &report.errors {
+            self.log
+                .push(format!("ERROR: could not write {file} — {err}"));
+        }
+        for file in &report.user_owned {
+            log::debug!("{file} is user-owned — leaving it alone");
+        }
+
+        let _ = self.tx.send(Event::ConfigsReconciled {
+            changed: report.changed,
+            spawning,
+        });
+
+        report.errors.is_empty()
+    }
+
+    /// The managed file whose port this service owns, if the user has taken it over.
+    fn user_owned_blocking(&self, svc: Service) -> Option<crate::state::ManagedFile> {
+        use crate::state::ManagedFile;
+        let file = match svc {
+            Service::Apache => ManagedFile::HttpdConf,
+            Service::Mysql => ManagedFile::MyIni,
+            Service::Php => return None, // PHP's port is a CLI flag, not a config file
+        };
+        let path = match svc {
+            Service::Apache => self.config.apache.conf.clone(),
+            Service::Mysql => self.config.mysql.ini.clone(),
+            Service::Php => unreachable!(),
+        };
+        let content = std::fs::read_to_string(&path).ok()?;
+        if crate::provision::is_rampp_owned(file, &content) {
+            None
+        } else {
+            Some(file)
         }
     }
 
@@ -256,6 +306,7 @@ impl Executor {
             "document root saved: {}",
             self.config.apache.document_root.display()
         ));
+        self.do_reconcile(state, None, state.phpmyadmin_enabled);
     }
 
     fn do_toggle_phpmyadmin(&mut self, enable: bool, state: &AppState) {
@@ -271,58 +322,11 @@ impl Executor {
             return;
         }
 
-        let php_port = state
-            .ports
-            .assigned(Service::Php)
-            .unwrap_or_else(|| self.port(Service::Php));
-
-        if enable {
-            let config_path = pma_dir.join("config.inc.php");
-            let should_write =
-                !config_path.exists() || phpmyadmin_conf::is_ramp_owned_config(&config_path);
-
-            if should_write {
-                let blowfish_secret = self.load_or_generate_blowfish_secret();
-                let mysql_port = state
-                    .ports
-                    .assigned(Service::Mysql)
-                    .unwrap_or_else(|| self.port(Service::Mysql));
-                let content = phpmyadmin_conf::generate_config_inc_php(
-                    &self.config.install_dir,
-                    mysql_port,
-                    &self.config.phpmyadmin.mysql_user,
-                    &self.config.phpmyadmin.mysql_password,
-                    &blowfish_secret,
-                );
-                if let Err(e) = atomic_write(&config_path, content.as_bytes()) {
-                    log::error!("phpMyAdmin: cannot write config.inc.php: {e}");
-                    self.log.push(format!(
-                        "ERROR: phpMyAdmin config.inc.php write failed: {e}"
-                    ));
-                    let _ = self.tx.send(Event::PhpMyAdminToggled(false));
-                    return;
-                }
-            }
-        }
-
-        let result = if enable {
-            phpmyadmin_conf::write_phpmyadmin_apache_conf_enabled(&self.config, php_port)
-        } else {
-            phpmyadmin_conf::write_phpmyadmin_apache_conf_disabled(&self.config)
-        };
-
-        if let Err(e) = result {
-            log::error!("phpMyAdmin: cannot write phpmyadmin.conf: {e}");
-            self.log
-                .push(format!("ERROR: phpMyAdmin conf write failed: {e}"));
-            let _ = self.tx.send(Event::PhpMyAdminToggled(!enable));
-            return;
-        }
-
         let _ = self.tx.send(Event::PhpMyAdminToggled(enable));
-        let _ = self.tx.send(Event::RestartService(Service::Apache));
-        // Browser is opened by do_open_phpmyadmin_browser, called when Apache becomes Ready
-        // after the restart, so we always use the correct (possibly port-rotated) port.
+        // The Apache restart, if one is needed, comes from ConfigsReconciled — a side
+        // effect must not emit a command event. Pass `enable` (not
+        // state.phpmyadmin_enabled) — see do_reconcile's doc comment.
+        self.do_reconcile(state, None, enable);
     }
 
     fn do_open_phpmyadmin_browser(&mut self, state: &AppState) {

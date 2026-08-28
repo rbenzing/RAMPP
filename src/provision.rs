@@ -2,10 +2,6 @@ use crate::state::{ManagedFile, PortState, RampConfig, Service};
 use std::path::PathBuf;
 
 /// One file's desired content.
-// `main.rs` compiles as a standalone binary crate and does not inherit `lib.rs`'s
-// crate-wide `#![allow(dead_code)]`. Nothing calls `provision` yet — task 10 wires
-// it into the executor and `main.rs`.
-#[allow(dead_code)] // wired up in task 10
 pub struct Desired {
     pub file: ManagedFile,
     pub path: PathBuf,
@@ -14,7 +10,6 @@ pub struct Desired {
 
 /// What a reconcile pass actually did.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // wired up in task 10
 pub struct ReconcileReport {
     /// Files whose content on disk changed. Drives restart decisions.
     pub changed: Vec<ManagedFile>,
@@ -25,7 +20,6 @@ pub struct ReconcileReport {
 
 /// Substring identifying a file as RAMPP-generated. A file without its marker is
 /// the user's and is never written.
-#[allow(dead_code)] // wired up in task 10
 pub fn marker(file: ManagedFile) -> &'static str {
     match file {
         ManagedFile::HttpdConf => "# RAMPP — generated httpd.conf (do not remove this line",
@@ -36,7 +30,6 @@ pub fn marker(file: ManagedFile) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // wired up in task 10
 pub fn is_rampp_owned(file: ManagedFile, content: &str) -> bool {
     // Pre-1.5.0 wrote a disabled phpmyadmin.conf as a zero-length file, and only
     // RAMPP ever did that — treat it as ours so upgrades are not blocked.
@@ -60,7 +53,6 @@ fn port_for(cfg: &RampConfig, ports: &PortState, svc: Service) -> u16 {
 ///
 /// `PhpMyAdminConfigInc` is omitted when `pma_dir_exists` is false — RAMPP never
 /// creates a config file for an install that is not there.
-#[allow(dead_code)] // wired up in task 10
 pub fn desired_configs(
     cfg: &RampConfig,
     ports: &PortState,
@@ -125,7 +117,6 @@ pub fn desired_configs(
 /// Idempotent by construction: a file is written only when its content actually
 /// differs, so a second pass reports nothing changed. That property is also what
 /// keeps the restart rule in the reducer from looping.
-#[allow(dead_code)] // wired up in task 10
 pub fn reconcile(desired: &[Desired]) -> ReconcileReport {
     let mut report = ReconcileReport::default();
 

@@ -1,5 +1,3 @@
-use crate::state::RampConfig;
-
 /// Marker identifying a RAMPP-generated phpmyadmin.conf. Present in both the
 /// enabled and disabled forms so ownership detection works either way.
 pub const PMA_CONF_MARKER: &str = "# RAMPP — phpMyAdmin";
@@ -79,13 +77,6 @@ $cfg['CheckConfigurationPermissions'] = false;
     )
 }
 
-pub fn is_ramp_owned_config(path: &std::path::Path) -> bool {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    content.contains("RAMPP — generated config.inc.php")
-}
-
 fn splitmix64(x: u64) -> u64 {
     let mut z = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -124,77 +115,10 @@ pub fn generate_phpmyadmin_conf_disabled() -> String {
     format!("{PMA_CONF_MARKER} disabled (do not remove this line)\n")
 }
 
-pub fn write_phpmyadmin_apache_conf_enabled(cfg: &RampConfig, php_port: u16) -> Result<(), String> {
-    let conf_path = cfg
-        .install_dir
-        .join("apache")
-        .join("conf")
-        .join("phpmyadmin.conf");
-    let dir = conf_path.parent().ok_or("phpmyadmin.conf has no parent")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
-    let content = generate_phpmyadmin_apache_conf(&cfg.install_dir, php_port);
-    crate::config::atomic_write(&conf_path, content.as_bytes())
-        .map_err(|e| format!("cannot write phpmyadmin.conf: {e}"))
-}
-
-pub fn write_phpmyadmin_apache_conf_disabled(cfg: &RampConfig) -> Result<(), String> {
-    let conf_path = cfg
-        .install_dir
-        .join("apache")
-        .join("conf")
-        .join("phpmyadmin.conf");
-    let dir = conf_path.parent().ok_or("phpmyadmin.conf has no parent")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
-    crate::config::atomic_write(&conf_path, generate_phpmyadmin_conf_disabled().as_bytes())
-        .map_err(|e| format!("cannot write phpmyadmin.conf: {e}"))
-}
-
-#[allow(dead_code)]
-pub fn ensure_phpmyadmin_apache_conf(
-    cfg: &RampConfig,
-    enabled: bool,
-    php_port: u16,
-) -> Result<(), String> {
-    if enabled {
-        write_phpmyadmin_apache_conf_enabled(cfg, php_port)
-    } else {
-        write_phpmyadmin_apache_conf_disabled(cfg)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ApacheConfig, MysqlConfig, PhpConfig, PhpMyAdminConfig, RampConfig};
-    use std::path::Path;
     use tempfile::TempDir;
-
-    fn test_cfg(dir: &Path) -> RampConfig {
-        RampConfig {
-            install_dir: dir.to_path_buf(),
-            apache: ApacheConfig {
-                port: 8080,
-                bin: dir.join("apache").join("bin").join("httpd.exe"),
-                conf: dir.join("apache").join("conf").join("httpd.conf"),
-                document_root: dir.join("apache").join("htdocs"),
-            },
-            mysql: MysqlConfig {
-                port: 3306,
-                bin: dir.join("mysql").join("bin").join("mysqld.exe"),
-                data_dir: dir.join("mysql").join("data"),
-                ini: dir.join("mysql").join("my.ini"),
-            },
-            php: PhpConfig {
-                port: 9000,
-                bin: dir.join("php").join("php-cgi.exe"),
-                ini: dir.join("php").join("php.ini"),
-            },
-            phpmyadmin: PhpMyAdminConfig {
-                mysql_user: "root".to_string(),
-                mysql_password: String::new(),
-            },
-        }
-    }
 
     #[test]
     fn apache_conf_contains_alias() {
@@ -295,29 +219,6 @@ mod tests {
     }
 
     #[test]
-    fn is_ramp_owned_config_true_when_marker_present() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.inc.php");
-        std::fs::write(&path, "<?php\n// RAMPP — generated config.inc.php (do not remove this line — RAMPP uses it to detect generated configs)\n").unwrap();
-        assert!(is_ramp_owned_config(&path));
-    }
-
-    #[test]
-    fn is_ramp_owned_config_false_when_marker_absent() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.inc.php");
-        std::fs::write(&path, "<?php\n// User config\n").unwrap();
-        assert!(!is_ramp_owned_config(&path));
-    }
-
-    #[test]
-    fn is_ramp_owned_config_false_when_file_missing() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("nonexistent.php");
-        assert!(!is_ramp_owned_config(&path));
-    }
-
-    #[test]
     fn blowfish_secret_is_32_chars() {
         let secret = generate_blowfish_secret();
         assert_eq!(secret.len(), 32, "blowfish_secret must be exactly 32 chars");
@@ -330,39 +231,6 @@ mod tests {
             secret.chars().all(|c| c.is_ascii_hexdigit()),
             "blowfish_secret must be hex"
         );
-    }
-
-    #[test]
-    fn write_enabled_creates_populated_conf() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        std::fs::create_dir_all(tmp.path().join("apache").join("conf")).unwrap();
-        write_phpmyadmin_apache_conf_enabled(&cfg, 9000).unwrap();
-        let content = std::fs::read_to_string(
-            tmp.path()
-                .join("apache")
-                .join("conf")
-                .join("phpmyadmin.conf"),
-        )
-        .unwrap();
-        assert!(content.contains("Alias /phpmyadmin"));
-    }
-
-    #[test]
-    fn write_disabled_creates_marker_only_conf() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        std::fs::create_dir_all(tmp.path().join("apache").join("conf")).unwrap();
-        write_phpmyadmin_apache_conf_disabled(&cfg).unwrap();
-        let content = std::fs::read_to_string(
-            tmp.path()
-                .join("apache")
-                .join("conf")
-                .join("phpmyadmin.conf"),
-        )
-        .unwrap();
-        assert!(content.contains(PMA_CONF_MARKER));
-        assert!(!content.contains("Alias /phpmyadmin"));
     }
 
     #[test]

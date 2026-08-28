@@ -14,14 +14,9 @@ pub fn health_endpoint_file(cfg: &RampConfig) -> PathBuf {
     health_endpoint_dir(cfg).join(HEALTH_ENDPOINT_FILE)
 }
 
-/// Generate a minimal httpd.conf for RAMPP's bundled Apache layout.
-/// Only called when the file does not already exist (never overwrites user edits).
-pub fn generate_httpd_conf(cfg: &RampConfig) -> String {
-    generate_httpd_conf_with_ports(cfg, cfg.apache.port, cfg.php.port)
-}
-
-/// Same as `generate_httpd_conf` but with explicit port overrides — used by the
-/// executor when the configured port was occupied and a different one was chosen.
+/// Generate a minimal httpd.conf for RAMPP's bundled Apache layout, rendered from
+/// the reducer's port ledger — the executor's `provision` reconciler is the only
+/// caller in production; ports are always explicit.
 pub fn generate_httpd_conf_with_ports(cfg: &RampConfig, port: u16, php_port: u16) -> String {
     let apache_dir = cfg.install_dir.join("apache");
     let apache_dir = apache_dir.display().to_string().replace('\\', "/");
@@ -176,61 +171,6 @@ IncludeOptional "conf/phpmyadmin.conf"
     )
 }
 
-/// Force-rewrite httpd.conf with explicit port overrides. Used when the executor
-/// has resolved Apache or PHP to a different port than the configured one.
-pub fn rewrite_httpd_conf_with_ports(
-    cfg: &RampConfig,
-    port: u16,
-    php_port: u16,
-) -> Result<(), String> {
-    let conf_path = &cfg.apache.conf;
-    let dir = conf_path.parent().ok_or("httpd.conf has no parent dir")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
-    ensure_health_endpoint(cfg)?;
-    let content = generate_httpd_conf_with_ports(cfg, port, php_port);
-    crate::config::atomic_write(conf_path, content.as_bytes())
-        .map_err(|e| format!("cannot rewrite httpd.conf: {e}"))
-}
-
-/// Marker line RAMPP writes into every conf it generates, used to tell its own
-/// output apart from a conf the user hand-wrote or edited wholesale.
-const GENERATED_CONF_MARKER: &str = "# RAMPP — generated httpd.conf (do not remove this line";
-
-/// True when `content` is a RAMPP-generated conf that predates the health endpoint.
-/// User-authored confs (no marker) are never considered upgradable.
-fn needs_health_endpoint_upgrade(content: &str) -> bool {
-    content.contains(GENERATED_CONF_MARKER)
-        && !content.contains(&format!("Alias \"{HEALTH_ENDPOINT_PATH}\" \""))
-}
-
-/// Write httpd.conf if it doesn't already exist.
-///
-/// If it does exist and is a RAMPP-generated conf from before the health endpoint,
-/// regenerate it — otherwise upgraded installs would keep a readiness probe that a
-/// project `.htaccess` can capture. A conf without RAMPP's marker is user-owned and
-/// is always left exactly as-is.
-pub fn ensure_httpd_conf(cfg: &RampConfig) -> Result<(), String> {
-    let conf_path = &cfg.apache.conf;
-    // The alias in the conf points here; never let it dangle.
-    ensure_health_endpoint(cfg)?;
-    if conf_path.exists() {
-        let existing = std::fs::read_to_string(conf_path)
-            .map_err(|e| format!("cannot read httpd.conf: {e}"))?;
-        if needs_health_endpoint_upgrade(&existing) {
-            log::info!("upgrading generated httpd.conf: adding RAMPP health endpoint");
-            let content = generate_httpd_conf(cfg);
-            return crate::config::atomic_write(conf_path, content.as_bytes())
-                .map_err(|e| format!("cannot upgrade httpd.conf: {e}"));
-        }
-        return Ok(());
-    }
-    let dir = conf_path.parent().ok_or("httpd.conf has no parent dir")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create apache/conf dir: {e}"))?;
-    let content = generate_httpd_conf(cfg);
-    crate::config::atomic_write(conf_path, content.as_bytes())
-        .map_err(|e| format!("cannot write httpd.conf: {e}"))
-}
-
 /// Ensure the health endpoint file Apache serves at `HEALTH_ENDPOINT_PATH` exists.
 /// Rewritten unconditionally: it is RAMPP-owned, tiny, and must never drift.
 pub fn ensure_health_endpoint(cfg: &RampConfig) -> Result<(), String> {
@@ -308,7 +248,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut cfg = test_cfg(tmp.path());
         cfg.apache.document_root = tmp.path().join("laravel_app").join("public");
-        let conf = generate_httpd_conf(&cfg);
+        let conf = generate_httpd_conf_with_ports(&cfg, cfg.apache.port, cfg.php.port);
 
         let expected_target = tmp
             .path()
@@ -388,7 +328,7 @@ mod tests {
     fn generates_conf_with_correct_port() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let conf = generate_httpd_conf(&cfg);
+        let conf = generate_httpd_conf_with_ports(&cfg, cfg.apache.port, cfg.php.port);
         assert!(conf.contains("Listen 127.0.0.1:8080"));
         assert!(conf.contains("ServerName 127.0.0.1:8080"));
     }
@@ -397,7 +337,7 @@ mod tests {
     fn generates_conf_with_php_fcgi_proxy() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let conf = generate_httpd_conf(&cfg);
+        let conf = generate_httpd_conf_with_ports(&cfg, cfg.apache.port, cfg.php.port);
         // Variant A: SetHandler URL must end with "//./" to dodge the
         // Windows mod_proxy_fcgi drive-letter URL parsing bug.
         assert!(
@@ -411,7 +351,7 @@ mod tests {
     fn proxy_fcgi_backend_type_generic_is_in_filesmatch_block() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let conf = generate_httpd_conf(&cfg);
+        let conf = generate_httpd_conf_with_ports(&cfg, cfg.apache.port, cfg.php.port);
         // GENERIC must be INSIDE the <FilesMatch> block, not at server scope.
         // At server scope it gets overridden by FPM-mode defaults inside the
         // FilesMatch and the Windows URL bug returns. Verified empirically.
@@ -429,120 +369,10 @@ mod tests {
     }
 
     #[test]
-    fn ensure_httpd_conf_creates_file() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        ensure_httpd_conf(&cfg).unwrap();
-        assert!(cfg.apache.conf.exists());
-    }
-
-    #[test]
-    fn ensure_httpd_conf_does_not_overwrite() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        std::fs::create_dir_all(cfg.apache.conf.parent().unwrap()).unwrap();
-        std::fs::write(&cfg.apache.conf, b"custom").unwrap();
-        ensure_httpd_conf(&cfg).unwrap();
-        assert_eq!(std::fs::read(&cfg.apache.conf).unwrap(), b"custom");
-    }
-
-    /// Existing installs already have a generated httpd.conf on disk, and
-    /// `ensure_httpd_conf` skips any file that exists. Without an upgrade path the
-    /// health endpoint would only ever reach brand-new installs, leaving upgraded
-    /// users stuck with a probe that their DocumentRoot can still capture.
-    #[test]
-    fn ensure_httpd_conf_upgrades_generated_conf_missing_health_endpoint() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        std::fs::create_dir_all(cfg.apache.conf.parent().unwrap()).unwrap();
-        // A v1.4.0-era generated conf: carries RAMPP's marker, predates the alias.
-        let stale = generate_httpd_conf(&cfg).replace(
-            &format!("Alias \"{HEALTH_ENDPOINT_PATH}\""),
-            "# (no health endpoint) Alias \"/__legacy\"",
-        );
-        assert!(
-            !stale.contains(&format!("Alias \"{HEALTH_ENDPOINT_PATH}\" \"")),
-            "test fixture must genuinely lack the health alias"
-        );
-        std::fs::write(&cfg.apache.conf, &stale).unwrap();
-
-        ensure_httpd_conf(&cfg).unwrap();
-
-        let after = std::fs::read_to_string(&cfg.apache.conf).unwrap();
-        assert!(
-            after.contains(&format!("Alias \"{HEALTH_ENDPOINT_PATH}\" \"")),
-            "a RAMPP-generated conf without the health endpoint must be upgraded"
-        );
-    }
-
-    /// The upgrade must key off RAMPP's own marker line. A hand-written conf has no
-    /// marker and must survive untouched even though it lacks the health endpoint.
-    #[test]
-    fn ensure_httpd_conf_never_upgrades_user_authored_conf() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        std::fs::create_dir_all(cfg.apache.conf.parent().unwrap()).unwrap();
-        let user_conf = "# my own httpd.conf\nListen 127.0.0.1:8080\n";
-        std::fs::write(&cfg.apache.conf, user_conf).unwrap();
-
-        ensure_httpd_conf(&cfg).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(&cfg.apache.conf).unwrap(),
-            user_conf,
-            "user-authored httpd.conf must never be rewritten"
-        );
-    }
-
-    /// An already-current generated conf must be left alone, so port choices the
-    /// executor previously resolved into it are not clobbered on the next launch.
-    #[test]
-    fn ensure_httpd_conf_leaves_current_generated_conf_untouched() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        std::fs::create_dir_all(cfg.apache.conf.parent().unwrap()).unwrap();
-        // Generated, current (has the alias), but with executor-resolved ports.
-        let resolved = generate_httpd_conf_with_ports(&cfg, 8099, 9001);
-        std::fs::write(&cfg.apache.conf, &resolved).unwrap();
-
-        ensure_httpd_conf(&cfg).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(&cfg.apache.conf).unwrap(),
-            resolved,
-            "current generated conf must not be regenerated"
-        );
-    }
-
-    /// Writing a conf that aliases the health endpoint without creating its target
-    /// leaves a dangling alias. Both conf writers must guarantee the file exists.
-    #[test]
-    fn ensure_httpd_conf_also_creates_health_endpoint_file() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        ensure_httpd_conf(&cfg).unwrap();
-        assert!(
-            health_endpoint_file(&cfg).exists(),
-            "generating httpd.conf must also create the aliased health file"
-        );
-    }
-
-    #[test]
-    fn rewrite_httpd_conf_with_ports_also_creates_health_endpoint_file() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = test_cfg(tmp.path());
-        rewrite_httpd_conf_with_ports(&cfg, 8099, 9001).unwrap();
-        assert!(
-            health_endpoint_file(&cfg).exists(),
-            "rewriting httpd.conf must also create the aliased health file"
-        );
-    }
-
-    #[test]
     fn generates_conf_with_phpmyadmin_include() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let conf = generate_httpd_conf(&cfg);
+        let conf = generate_httpd_conf_with_ports(&cfg, cfg.apache.port, cfg.php.port);
         assert!(
             conf.contains(r#"IncludeOptional "conf/phpmyadmin.conf""#),
             "httpd.conf must include phpmyadmin.conf"
@@ -553,7 +383,7 @@ mod tests {
     fn phpmyadmin_include_is_optional() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let conf = generate_httpd_conf(&cfg);
+        let conf = generate_httpd_conf_with_ports(&cfg, cfg.apache.port, cfg.php.port);
         assert!(
             conf.contains(r#"IncludeOptional "conf/phpmyadmin.conf""#),
             "a missing phpmyadmin.conf must not stop Apache from starting"
@@ -580,7 +410,7 @@ mod tests {
     fn health_probe_is_excluded_from_the_access_log() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
-        let conf = generate_httpd_conf(&cfg);
+        let conf = generate_httpd_conf_with_ports(&cfg, cfg.apache.port, cfg.php.port);
         assert!(conf.contains(r#"SetEnvIf Request_URI "^/__ramp_health$" ramp_health"#));
         assert!(
             conf.contains("env=!ramp_health"),
@@ -593,7 +423,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut cfg = test_cfg(tmp.path());
         cfg.apache.document_root = tmp.path().join("custom_site");
-        let conf = generate_httpd_conf(&cfg);
+        let conf = generate_httpd_conf_with_ports(&cfg, cfg.apache.port, cfg.php.port);
         let expected = tmp
             .path()
             .join("custom_site")

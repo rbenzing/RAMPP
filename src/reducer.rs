@@ -1,6 +1,7 @@
 use crate::events::{Event, SideEffect};
 use crate::state::{
-    retry_delay, AppState, DesiredServiceState, Service, ServiceState, MAX_RETRIES, PORT_SCAN_RANGE,
+    retry_delay, AppState, DesiredServiceState, ManagedFile, Service, ServiceState, MAX_RETRIES,
+    PORT_SCAN_RANGE,
 };
 
 /// Pure reducer: STATE + EVENT → (NEW STATE, SIDE EFFECTS).
@@ -352,6 +353,41 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             ));
         }
 
+        // ── Config reconcile ─────────────────────────────────────────────────
+        Event::ConfigsReconciled { changed, spawning } => {
+            let mut to_restart: Vec<Service> = Vec::new();
+            for file in &changed {
+                let svc = match file {
+                    ManagedFile::HttpdConf | ManagedFile::PhpMyAdminConf => Some(Service::Apache),
+                    ManagedFile::MyIni => Some(Service::Mysql),
+                    ManagedFile::PhpIni => Some(Service::Php),
+                    // PHP reads config.inc.php on every request — nothing to restart.
+                    ManagedFile::PhpMyAdminConfigInc => None,
+                };
+                let Some(svc) = svc else { continue };
+                if Some(svc) == spawning || to_restart.contains(&svc) {
+                    continue;
+                }
+                if matches!(
+                    state.service(svc).state,
+                    ServiceState::Running | ServiceState::Starting
+                ) {
+                    to_restart.push(svc);
+                }
+            }
+
+            for svc in to_restart {
+                state.service_mut(svc).state = ServiceState::Stopping;
+                state.clear_started_at(svc);
+                state.service_mut(svc).desired = DesiredServiceState::Running;
+                effects.push(SideEffect::StopHealthCheck(svc));
+                effects.push(SideEffect::KillService(svc));
+                effects.push(SideEffect::LogEvent(format!(
+                    "{svc}: restarting to apply changed configuration"
+                )));
+            }
+        }
+
         // ── Tick (drives health check cycle — executor owns the timer) ───────
         Event::Tick => {
             // Tick is consumed by the executor to fire health checks.
@@ -530,8 +566,8 @@ mod tests {
     use super::*;
     use crate::events::Event;
     use crate::state::{
-        ApacheConfig, AppState, DesiredServiceState, MysqlConfig, PhpConfig, RampConfig, Service,
-        ServiceState,
+        ApacheConfig, AppState, DesiredServiceState, ManagedFile, MysqlConfig, PhpConfig,
+        RampConfig, Service, ServiceState,
     };
 
     fn make_state() -> AppState {
@@ -1700,5 +1736,126 @@ mod tests {
             },
         );
         assert_eq!(state.ports.assigned(Service::Apache), None);
+    }
+
+    // ── ConfigsReconciled (task 10) ────────────────────────────────────────
+
+    fn restarted(effects: &[SideEffect]) -> Vec<Service> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                SideEffect::KillService(s) => Some(*s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn changed_httpd_conf_restarts_a_running_apache() {
+        let mut state = make_state();
+        state.apache.state = ServiceState::Running;
+        let (new_state, effects) = reducer(
+            state,
+            Event::ConfigsReconciled {
+                changed: vec![ManagedFile::HttpdConf],
+                spawning: None,
+            },
+        );
+        assert_eq!(restarted(&effects), vec![Service::Apache]);
+        assert_eq!(new_state.apache.state, ServiceState::Stopping);
+        assert_eq!(new_state.apache.desired, DesiredServiceState::Running);
+    }
+
+    #[test]
+    fn changed_phpmyadmin_conf_also_restarts_apache() {
+        let mut state = make_state();
+        state.apache.state = ServiceState::Running;
+        let (_, effects) = reducer(
+            state,
+            Event::ConfigsReconciled {
+                changed: vec![ManagedFile::PhpMyAdminConf],
+                spawning: None,
+            },
+        );
+        assert_eq!(restarted(&effects), vec![Service::Apache]);
+    }
+
+    #[test]
+    fn changed_config_inc_php_restarts_nothing() {
+        let mut state = make_state();
+        state.apache.state = ServiceState::Running;
+        let (_, effects) = reducer(
+            state,
+            Event::ConfigsReconciled {
+                changed: vec![ManagedFile::PhpMyAdminConfigInc],
+                spawning: None,
+            },
+        );
+        assert!(restarted(&effects).is_empty(), "PHP reads it per request");
+    }
+
+    #[test]
+    fn a_stopped_service_is_not_started_by_a_config_change() {
+        let state = make_state(); // everything Stopped
+        let (new_state, effects) = reducer(
+            state,
+            Event::ConfigsReconciled {
+                changed: vec![ManagedFile::HttpdConf, ManagedFile::MyIni],
+                spawning: None,
+            },
+        );
+        assert!(restarted(&effects).is_empty());
+        assert_eq!(new_state.apache.state, ServiceState::Stopped);
+        assert_eq!(new_state.mysql.state, ServiceState::Stopped);
+    }
+
+    #[test]
+    fn the_service_being_spawned_is_not_restarted_by_its_own_reconcile() {
+        let mut state = make_state();
+        state.apache.state = ServiceState::Starting;
+        let (_, effects) = reducer(
+            state,
+            Event::ConfigsReconciled {
+                changed: vec![ManagedFile::HttpdConf],
+                spawning: Some(Service::Apache),
+            },
+        );
+        assert!(
+            restarted(&effects).is_empty(),
+            "spawning Apache must not immediately kill the process it just started"
+        );
+    }
+
+    #[test]
+    fn each_service_is_restarted_at_most_once() {
+        let mut state = make_state();
+        state.apache.state = ServiceState::Running;
+        let (_, effects) = reducer(
+            state,
+            Event::ConfigsReconciled {
+                changed: vec![ManagedFile::HttpdConf, ManagedFile::PhpMyAdminConf],
+                spawning: None,
+            },
+        );
+        assert_eq!(restarted(&effects), vec![Service::Apache], "must dedupe");
+    }
+
+    #[test]
+    fn an_empty_change_set_restarts_nothing() {
+        let mut state = make_state();
+        state.apache.state = ServiceState::Running;
+        state.mysql.state = ServiceState::Running;
+        state.php.state = ServiceState::Running;
+        let (_, effects) = reducer(
+            state,
+            Event::ConfigsReconciled {
+                changed: vec![],
+                spawning: None,
+            },
+        );
+        assert!(
+            restarted(&effects).is_empty(),
+            "an idempotent reconcile must terminate the restart chain"
+        );
     }
 }

@@ -23,8 +23,7 @@ use executor::Executor;
 use logger::SharedLog;
 use reducer::reducer;
 use state::{
-    AppState, DesiredServiceState, PersistedState, Service, ServiceState, COMMAND_DEBOUNCE,
-    SHUTDOWN_GRACE_PERIOD,
+    AppState, DesiredServiceState, Service, ServiceState, COMMAND_DEBOUNCE, SHUTDOWN_GRACE_PERIOD,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -62,20 +61,18 @@ fn main() {
         fatal(&format!("cannot create runtime directories: {e}"));
     }
 
-    // 2. Generate httpd.conf if missing
-    if let Err(e) = apache_conf::ensure_httpd_conf(&config) {
-        log::warn!("cannot generate httpd.conf: {e}");
+    // 2. Directories and the static health endpoint (not config content).
+    if let Err(e) = apache_conf::ensure_health_endpoint(&config) {
+        log::warn!("cannot create health endpoint: {e}");
     }
     if let Err(e) = apache_conf::ensure_document_root(&config) {
         log::warn!("cannot create document root: {e}");
     }
-
-    // 3. Generate my.ini if missing
-    if let Err(e) = mysql_conf::ensure_my_ini(&config) {
-        log::warn!("cannot generate my.ini: {e}");
+    if let Err(e) = php_conf::ensure_php_dirs(&config) {
+        log::warn!("cannot create logs dir: {e}");
     }
 
-    // 4. MySQL data directory initialization — deferred: if mysqld binary is missing
+    // 3. MySQL data directory initialization — deferred: if mysqld binary is missing
     //    we record the error and let the UI surface it rather than crashing silently.
     let mysql_init_error: Option<String> = if mysql_conf::needs_initialization(&config) {
         log::info!("MySQL data directory is empty — running --initialize-insecure");
@@ -90,17 +87,9 @@ fn main() {
         None
     };
 
-    // 5. Generate php.ini if missing (PHP-CGI is optional — missing binary is not fatal)
-    if let Err(e) = php_conf::ensure_php_dirs(&config) {
-        log::warn!("cannot create logs dir: {e}");
-    }
-    if let Err(e) = php_conf::ensure_php_ini(&config) {
-        log::warn!("cannot generate php.ini: {e}");
-    }
-
     // --- Event loop setup -------------------------------------------------
 
-    let persisted = load_persisted_state(&install_dir);
+    let persisted = config::read_persisted_state(&install_dir.join("rampp.state"));
 
     let mut app_state = AppState::new(config.clone());
     app_state.apache.desired = persisted.apache_desired;
@@ -114,87 +103,40 @@ fn main() {
         app_state.mysql.desired = DesiredServiceState::Stopped;
     }
 
-    // --- phpMyAdmin startup reconciliation ----------------------------------
-    // Must run after AppState and RampConfig are ready, before the event loop starts.
-    // Ensures phpmyadmin.conf always exists on disk (Apache Include never fails),
-    // and force-disables phpMyAdmin if its directory is missing.
-    {
-        let phpmyadmin_dir = config.install_dir.join("phpmyadmin");
-        let phpmyadmin_dir_exists = phpmyadmin_dir.exists();
-        app_state.phpmyadmin_dir_exists = phpmyadmin_dir_exists;
+    // phpMyAdmin cannot be enabled without an install to point at.
+    let phpmyadmin_dir = config.install_dir.join("phpmyadmin");
+    let phpmyadmin_dir_exists = phpmyadmin_dir.is_dir();
+    app_state.phpmyadmin_dir_exists = phpmyadmin_dir_exists;
+    app_state.phpmyadmin_enabled = persisted.phpmyadmin_enabled && phpmyadmin_dir_exists;
 
-        if persisted.phpmyadmin_enabled && !phpmyadmin_dir_exists {
-            log::warn!(
-                "phpMyAdmin enabled in state but not found at {} — disabling",
-                phpmyadmin_dir.display()
-            );
-            app_state.phpmyadmin_enabled = false;
-            if let Err(e) = phpmyadmin_conf::write_phpmyadmin_apache_conf_disabled(&config) {
-                log::error!("Failed to write phpmyadmin.conf (disabled): {e}");
-            }
-            // Persist the force-disabled state so it survives restart
-            // NOTE: must be kept in sync with do_persist in executor.rs
-            let state_path = install_dir.join("rampp.state");
-            let p = PersistedState {
-                phpmyadmin_enabled: false,
-                ..persisted.clone()
-            };
-            match serde_json::to_vec_pretty(&p) {
-                Ok(data) => {
-                    if let Err(e) = config::atomic_write(&state_path, &data) {
-                        log::error!("Failed to persist phpmyadmin disabled state: {e}");
-                    }
-                }
-                Err(e) => log::error!("Failed to serialize phpmyadmin disabled state: {e}"),
-            }
-        } else if persisted.phpmyadmin_enabled && phpmyadmin_dir_exists {
-            app_state.phpmyadmin_enabled = true;
-            // Ensure config.inc.php exists or is regenerated if RAMPP-owned. Without
-            // it, phpMyAdmin falls back to built-in defaults (no AllowNoPassword)
-            // and rejects login with "Login without a password is forbidden".
-            let config_inc = phpmyadmin_dir.join("config.inc.php");
-            let should_write =
-                !config_inc.exists() || phpmyadmin_conf::is_ramp_owned_config(&config_inc);
-            if should_write {
-                let secret = persisted
-                    .phpmyadmin_blowfish_secret
-                    .clone()
-                    .unwrap_or_else(phpmyadmin_conf::generate_blowfish_secret);
-                let content = phpmyadmin_conf::generate_config_inc_php(
-                    &config.install_dir,
-                    config.mysql.port,
-                    &config.phpmyadmin.mysql_user,
-                    &config.phpmyadmin.mysql_password,
-                    &secret,
-                );
-                if let Err(e) = config::atomic_write(&config_inc, content.as_bytes()) {
-                    log::error!("Failed to write phpMyAdmin config.inc.php: {e}");
-                } else if persisted.phpmyadmin_blowfish_secret.is_none() {
-                    // Persist the freshly-generated secret so subsequent runs reuse it
-                    let state_path = install_dir.join("rampp.state");
-                    let p = PersistedState {
-                        phpmyadmin_blowfish_secret: Some(secret),
-                        ..persisted.clone()
-                    };
-                    if let Ok(data) = serde_json::to_vec_pretty(&p) {
-                        if let Err(e) = config::atomic_write(&state_path, &data) {
-                            log::error!("Failed to persist phpMyAdmin blowfish secret: {e}");
-                        }
-                    }
-                }
-            }
-            if let Err(e) =
-                phpmyadmin_conf::write_phpmyadmin_apache_conf_enabled(&config, config.php.port)
-            {
-                log::error!("Failed to write phpmyadmin.conf (enabled): {e}");
-            }
-        } else {
-            // phpmyadmin_enabled == false: write empty conf (idempotent)
-            app_state.phpmyadmin_enabled = false;
-            if let Err(e) = phpmyadmin_conf::write_phpmyadmin_apache_conf_disabled(&config) {
-                log::error!("Failed to write phpmyadmin.conf (disabled): {e}");
-            }
-        }
+    // One secret, generated once and persisted, so cookie auth stays stable.
+    let mut persisted = persisted;
+    if persisted.phpmyadmin_blowfish_secret.is_none() {
+        persisted.phpmyadmin_blowfish_secret = Some(phpmyadmin_conf::generate_blowfish_secret());
+    }
+    persisted.phpmyadmin_enabled = app_state.phpmyadmin_enabled;
+    if let Err(e) = config::write_persisted_state(&install_dir.join("rampp.state"), &persisted) {
+        log::error!("cannot persist state: {e}");
+    }
+
+    // Bring every managed config file in line. Nothing is running yet, so no
+    // restarts can be needed and the report is only logged.
+    let secret = persisted
+        .phpmyadmin_blowfish_secret
+        .clone()
+        .unwrap_or_default();
+    let report = provision::reconcile(&provision::desired_configs(
+        &config,
+        &app_state.ports,
+        app_state.phpmyadmin_enabled,
+        phpmyadmin_dir_exists,
+        &secret,
+    ));
+    for (file, err) in &report.errors {
+        log::error!("cannot write {file}: {err}");
+    }
+    for file in &report.user_owned {
+        log::info!("{file} is user-owned — RAMPP will not modify it");
     }
 
     let shared_state = Arc::new(Mutex::new(app_state.clone()));
@@ -354,14 +296,6 @@ fn create_runtime_dirs(cfg: &crate::state::RampConfig) -> Result<(), String> {
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
     Ok(())
-}
-
-fn load_persisted_state(install_dir: &std::path::Path) -> PersistedState {
-    let path = install_dir.join("rampp.state");
-    std::fs::read(&path)
-        .ok()
-        .and_then(|data| serde_json::from_slice(&data).ok())
-        .unwrap_or_else(PersistedState::default_stopped)
 }
 
 fn debounce_key(event: &Event) -> Option<String> {

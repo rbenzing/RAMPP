@@ -38,6 +38,13 @@ pub enum Event {
 
     // Config — boxed to keep the enum variant size uniform
     ConfigReloaded(Box<crate::state::RampConfig>),
+    /// Result of a config reconcile pass. `changed` lists files whose content on
+    /// disk actually differed; `spawning` is the service whose spawn triggered
+    /// this pass, which must not be restarted by its own reconcile.
+    ConfigsReconciled {
+        changed: Vec<crate::state::ManagedFile>,
+        spawning: Option<Service>,
+    },
 
     // Internal
     FatalError {
