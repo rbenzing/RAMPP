@@ -132,26 +132,89 @@ pub struct RampConfig {
     pub phpmyadmin: PhpMyAdminConfig,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PortState {
-    pub apache_bound: bool,
-    pub mysql_bound: bool,
-    pub php_bound: bool,
+/// One service's slot in the port ledger.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PortSlot {
+    /// Port allocated for the next or current bind. None before the first start,
+    /// and after the service reaches Stopped or Error.
+    assigned: Option<u16>,
+    /// Ports proven unbindable during the current start attempt. Cleared by
+    /// `begin_attempt`. This is what bounds the allocation retry loop.
+    unavailable: Vec<u16>,
 }
 
-impl Default for PortState {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Reducer-owned port allocation ledger — the single source of truth for which
+/// port each service will bind. Runtime state; never persisted.
+///
+/// Allocation happens inside the single-threaded reducer, which is what makes
+/// two services sharing a port structurally impossible: each StartService sees
+/// the ledger already updated by the one before it.
+///
+/// Not yet consumed outside this module — `Executor` still allocates its own
+/// port until task 8 switches the wiring over, so the methods below are
+/// unused by `src/main.rs`'s standalone binary crate (which does not inherit
+/// `src/lib.rs`'s crate-wide `#![allow(dead_code)]`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortState {
+    apache: PortSlot,
+    mysql: PortSlot,
+    php: PortSlot,
 }
 
 impl PortState {
-    pub fn new() -> Self {
-        Self {
-            apache_bound: false,
-            mysql_bound: false,
-            php_bound: false,
+    fn slot(&self, svc: Service) -> &PortSlot {
+        match svc {
+            Service::Apache => &self.apache,
+            Service::Mysql => &self.mysql,
+            Service::Php => &self.php,
         }
+    }
+
+    fn slot_mut(&mut self, svc: Service) -> &mut PortSlot {
+        match svc {
+            Service::Apache => &mut self.apache,
+            Service::Mysql => &mut self.mysql,
+            Service::Php => &mut self.php,
+        }
+    }
+
+    #[allow(dead_code)] // wired up in task 8
+    pub fn assigned(&self, svc: Service) -> Option<u16> {
+        self.slot(svc).assigned
+    }
+
+    #[allow(dead_code)] // wired up in task 8
+    pub fn assign(&mut self, svc: Service, port: u16) {
+        self.slot_mut(svc).assigned = Some(port);
+    }
+
+    #[allow(dead_code)] // wired up in task 8
+    pub fn is_unavailable(&self, svc: Service, port: u16) -> bool {
+        self.slot(svc).unavailable.contains(&port)
+    }
+
+    #[allow(dead_code)] // wired up in task 8
+    pub fn mark_unavailable(&mut self, svc: Service, port: u16) {
+        let slot = self.slot_mut(svc);
+        if !slot.unavailable.contains(&port) {
+            slot.unavailable.push(port);
+        }
+    }
+
+    /// Start a fresh attempt: forget the previous assignment and re-probe ports
+    /// that were blocked last time, since whatever held them may have released.
+    #[allow(dead_code)] // wired up in task 8
+    pub fn begin_attempt(&mut self, svc: Service) {
+        let slot = self.slot_mut(svc);
+        slot.assigned = None;
+        slot.unavailable.clear();
+    }
+
+    /// Drop the assignment when a service is no longer running, so the UI stops
+    /// advertising a port nothing is listening on.
+    #[allow(dead_code)] // wired up in task 8
+    pub fn release(&mut self, svc: Service) {
+        self.slot_mut(svc).assigned = None;
     }
 }
 
@@ -179,7 +242,7 @@ impl AppState {
             mysql: ServiceStatus::new(),
             php: ServiceStatus::new(),
             config,
-            ports: PortState::new(),
+            ports: PortState::default(),
             phpmyadmin_enabled: false,
             phpmyadmin_dir_exists: false,
             open_phpmyadmin_on_apache_ready: false,

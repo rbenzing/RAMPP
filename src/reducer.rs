@@ -1,6 +1,6 @@
 use crate::events::{Event, SideEffect};
 use crate::state::{
-    retry_delay, AppState, DesiredServiceState, Service, ServiceState, MAX_RETRIES,
+    retry_delay, AppState, DesiredServiceState, Service, ServiceState, MAX_RETRIES, PORT_SCAN_RANGE,
 };
 
 /// Pure reducer: STATE + EVENT → (NEW STATE, SIDE EFFECTS).
@@ -431,6 +431,51 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
     }
 
     (state, effects)
+}
+
+/// Configured (home) port for a service, straight from rampp.toml.
+#[allow(dead_code)] // wired up in task 8
+fn configured_port(state: &AppState, svc: Service) -> u16 {
+    match svc {
+        Service::Apache => state.config.apache.port,
+        Service::Mysql => state.config.mysql.port,
+        Service::Php => state.config.php.port,
+    }
+}
+
+/// Next candidate port for `svc`, or None when the scan range is exhausted.
+///
+/// Pure. Never returns a port assigned to, or configured for, another service —
+/// which is what keeps overlapping scan ranges (e.g. apache 8080 and php 8085,
+/// both scanning 20 upward) from colliding.
+///
+/// Not yet called from the reducer's StartService handling — that wiring is
+/// task 8, so this function is presently unused by `src/main.rs`'s standalone
+/// binary crate (which does not inherit `src/lib.rs`'s crate-wide
+/// `#![allow(dead_code)]`).
+#[allow(dead_code)] // wired up in task 8
+pub fn allocate_port(state: &AppState, svc: Service) -> Option<u16> {
+    let start = configured_port(state, svc);
+    let others: Vec<Service> = [Service::Apache, Service::Mysql, Service::Php]
+        .into_iter()
+        .filter(|&s| s != svc)
+        .collect();
+
+    for offset in 0..=PORT_SCAN_RANGE {
+        let candidate = start.checked_add(offset)?;
+        if state.ports.is_unavailable(svc, candidate) {
+            continue;
+        }
+        let taken_by_other = others.iter().any(|&other| {
+            state.ports.assigned(other) == Some(candidate)
+                || configured_port(state, other) == candidate
+        });
+        if taken_by_other {
+            continue;
+        }
+        return Some(candidate);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1375,5 +1420,78 @@ mod tests {
         assert!(!effects
             .iter()
             .any(|e| matches!(e, SideEffect::KillService(Service::Apache))));
+    }
+
+    // ── Port ledger / allocate_port ─────────────────────────────────────────
+
+    #[test]
+    fn allocate_port_returns_the_configured_port_when_free() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        assert_eq!(allocate_port(&state, Service::Apache), Some(8080));
+    }
+
+    #[test]
+    fn allocate_port_skips_ports_marked_unavailable() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.ports.mark_unavailable(Service::Apache, 8080);
+        state.ports.mark_unavailable(Service::Apache, 8081);
+        assert_eq!(allocate_port(&state, Service::Apache), Some(8082));
+    }
+
+    #[test]
+    fn allocate_port_never_returns_a_port_assigned_to_another_service() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.config.php.port = 8085;
+        // PHP already holds 8085; Apache scanning upward must step over it.
+        state.ports.assign(Service::Php, 8085);
+        for _ in 0..5 {
+            state.ports.mark_unavailable(Service::Apache, 8080);
+            state.ports.mark_unavailable(Service::Apache, 8081);
+            state.ports.mark_unavailable(Service::Apache, 8082);
+            state.ports.mark_unavailable(Service::Apache, 8083);
+            state.ports.mark_unavailable(Service::Apache, 8084);
+        }
+        assert_eq!(allocate_port(&state, Service::Apache), Some(8086));
+    }
+
+    #[test]
+    fn allocate_port_never_steals_another_services_configured_port() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.config.php.port = 8081;
+        // PHP has not started, but 8081 is its home port and must stay reserved.
+        state.ports.mark_unavailable(Service::Apache, 8080);
+        assert_eq!(allocate_port(&state, Service::Apache), Some(8082));
+    }
+
+    #[test]
+    fn allocate_port_returns_none_when_the_scan_range_is_exhausted() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        for offset in 0..=PORT_SCAN_RANGE {
+            state.ports.mark_unavailable(Service::Apache, 8080 + offset);
+        }
+        assert_eq!(allocate_port(&state, Service::Apache), None);
+    }
+
+    #[test]
+    fn begin_attempt_clears_previous_unavailable_ports() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.ports.mark_unavailable(Service::Apache, 8080);
+        state.ports.begin_attempt(Service::Apache);
+        assert_eq!(allocate_port(&state, Service::Apache), Some(8080));
+    }
+
+    #[test]
+    fn release_clears_the_assignment() {
+        let mut state = make_state();
+        state.ports.assign(Service::Mysql, 3307);
+        assert_eq!(state.ports.assigned(Service::Mysql), Some(3307));
+        state.ports.release(Service::Mysql);
+        assert_eq!(state.ports.assigned(Service::Mysql), None);
     }
 }
