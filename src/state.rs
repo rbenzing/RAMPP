@@ -64,10 +64,6 @@ pub struct ServiceStatus {
     /// Set when the service transitions to Starting; cleared on Running/Stopped/Error/Crashed.
     /// Used by the UI to display elapsed startup time. Not persisted.
     pub started_at: Option<Instant>,
-    /// Port the service is actually bound to. May differ from the configured port when
-    /// the configured one was in use and the executor scanned upward for a free one.
-    /// None until the first successful spawn. Not persisted.
-    pub effective_port: Option<u16>,
 }
 
 impl Default for ServiceStatus {
@@ -85,7 +81,6 @@ impl ServiceStatus {
             last_error: None,
             health_fail_streak: 0,
             started_at: None,
-            effective_port: None,
         }
     }
 }
@@ -149,11 +144,6 @@ struct PortSlot {
 /// Allocation happens inside the single-threaded reducer, which is what makes
 /// two services sharing a port structurally impossible: each StartService sees
 /// the ledger already updated by the one before it.
-///
-/// Not yet consumed outside this module — `Executor` still allocates its own
-/// port until task 8 switches the wiring over, so the methods below are
-/// unused by `src/main.rs`'s standalone binary crate (which does not inherit
-/// `src/lib.rs`'s crate-wide `#![allow(dead_code)]`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PortState {
     apache: PortSlot,
@@ -178,22 +168,18 @@ impl PortState {
         }
     }
 
-    #[allow(dead_code)] // wired up in task 8
     pub fn assigned(&self, svc: Service) -> Option<u16> {
         self.slot(svc).assigned
     }
 
-    #[allow(dead_code)] // wired up in task 8
     pub fn assign(&mut self, svc: Service, port: u16) {
         self.slot_mut(svc).assigned = Some(port);
     }
 
-    #[allow(dead_code)] // wired up in task 8
     pub fn is_unavailable(&self, svc: Service, port: u16) -> bool {
         self.slot(svc).unavailable.contains(&port)
     }
 
-    #[allow(dead_code)] // wired up in task 8
     pub fn mark_unavailable(&mut self, svc: Service, port: u16) {
         let slot = self.slot_mut(svc);
         if !slot.unavailable.contains(&port) {
@@ -203,7 +189,6 @@ impl PortState {
 
     /// Start a fresh attempt: forget the previous assignment and re-probe ports
     /// that were blocked last time, since whatever held them may have released.
-    #[allow(dead_code)] // wired up in task 8
     pub fn begin_attempt(&mut self, svc: Service) {
         let slot = self.slot_mut(svc);
         slot.assigned = None;
@@ -212,7 +197,6 @@ impl PortState {
 
     /// Drop the assignment when a service is no longer running, so the UI stops
     /// advertising a port nothing is listening on.
-    #[allow(dead_code)] // wired up in task 8
     pub fn release(&mut self, svc: Service) {
         self.slot_mut(svc).assigned = None;
     }

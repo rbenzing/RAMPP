@@ -63,6 +63,7 @@ impl eframe::App for RampApp {
                 Service::Apache,
                 &state.apache,
                 state.config.apache.port,
+                state.ports.assigned(Service::Apache),
                 false,
                 false,
                 false,
@@ -77,6 +78,7 @@ impl eframe::App for RampApp {
                 Service::Mysql,
                 &state.mysql,
                 state.config.mysql.port,
+                state.ports.assigned(Service::Mysql),
                 state.phpmyadmin_enabled,
                 state.phpmyadmin_dir_exists,
                 true,
@@ -91,6 +93,7 @@ impl eframe::App for RampApp {
                 Service::Php,
                 &state.php,
                 state.config.php.port,
+                state.ports.assigned(Service::Php),
                 false,
                 false,
                 false,
@@ -202,6 +205,7 @@ fn service_row(
     svc: Service,
     status: &crate::state::ServiceStatus,
     configured_port: u16,
+    assigned_port: Option<u16>,
     phpmyadmin_enabled: bool,
     phpmyadmin_dir_exists: bool,
     show_admin: bool,
@@ -217,7 +221,7 @@ fn service_row(
         ui.label(format!("[{}]", status.state));
 
         // Show effective port — yellow when remapped from the configured value.
-        if let Some(eff) = status.effective_port {
+        if let Some(eff) = assigned_port {
             if eff == configured_port {
                 ui.label(format!(":{eff}"));
             } else {
@@ -316,7 +320,7 @@ fn service_row(
 
             // Open in browser — Apache only
             if svc == Service::Apache {
-                let port = status.effective_port.unwrap_or(configured_port);
+                let port = assigned_port.unwrap_or(configured_port);
                 let is_running = status.state == ServiceState::Running;
                 let open_resp = ui.add_enabled(is_running, egui::Button::new("↗ Open"));
                 let clicked = open_resp.clicked();

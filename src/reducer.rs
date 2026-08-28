@@ -19,8 +19,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     state.service_mut(svc).desired = DesiredServiceState::Running;
                     state.service_mut(svc).retry_count = 0;
                     state.service_mut(svc).last_error = None;
-                    effects.push(SideEffect::SpawnService(svc));
-                    effects.push(SideEffect::StartReadinessCheck(svc));
+                    begin_start(&mut state, svc, &mut effects);
                     effects.push(SideEffect::LogEvent(format!("{svc}: starting")));
                     effects.push(SideEffect::PersistDesiredState);
                 }
@@ -30,8 +29,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     state.service_mut(svc).desired = DesiredServiceState::Running;
                     state.service_mut(svc).retry_count = 0;
                     state.service_mut(svc).last_error = None;
-                    effects.push(SideEffect::SpawnService(svc));
-                    effects.push(SideEffect::StartReadinessCheck(svc));
+                    begin_start(&mut state, svc, &mut effects);
                     effects.push(SideEffect::LogEvent(format!(
                         "{svc}: restarting after crash"
                     )));
@@ -91,8 +89,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     state.service_mut(svc).desired = DesiredServiceState::Running;
                     state.service_mut(svc).retry_count = 0;
                     state.service_mut(svc).last_error = None;
-                    effects.push(SideEffect::SpawnService(svc));
-                    effects.push(SideEffect::StartReadinessCheck(svc));
+                    begin_start(&mut state, svc, &mut effects);
                     effects.push(SideEffect::LogEvent(format!("{svc}: starting (restart)")));
                 }
                 ServiceState::Stopping => {
@@ -142,11 +139,12 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     if state.service(svc).desired == DesiredServiceState::Running {
                         state.set_starting(svc);
                         state.service_mut(svc).retry_count = 0;
-                        effects.push(SideEffect::SpawnService(svc));
-                        effects.push(SideEffect::StartReadinessCheck(svc));
+                        begin_start(&mut state, svc, &mut effects);
                         effects.push(SideEffect::LogEvent(format!(
                             "{svc}: restarting per desired state"
                         )));
+                    } else {
+                        state.ports.release(svc);
                     }
                 }
                 ServiceState::Starting | ServiceState::Running => {
@@ -183,6 +181,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                             state.clear_started_at(svc);
                             state.service_mut(svc).last_error =
                                 Some("max retries exceeded".to_string());
+                            state.ports.release(svc);
                             effects.push(SideEffect::LogEvent(format!(
                                 "{svc}: max retries exceeded → Error"
                             )));
@@ -212,6 +211,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             state.service_mut(svc).state = ServiceState::Error;
             state.clear_started_at(svc);
             state.service_mut(svc).last_error = Some(reason.clone());
+            state.ports.release(svc);
             effects.push(SideEffect::LogEvent(format!(
                 "{svc}: spawn failed — {reason}"
             )));
@@ -252,6 +252,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                             state.clear_started_at(svc);
                             state.service_mut(svc).last_error =
                                 Some("max retries exceeded after health failures".to_string());
+                            state.ports.release(svc);
                             effects.push(SideEffect::LogEvent(format!(
                                 "{svc}: max retries exceeded → Error"
                             )));
@@ -271,18 +272,39 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             )));
         }
 
-        Event::PortAssigned { service: svc, port } => {
-            state.service_mut(svc).effective_port = Some(port);
-            // Only log when the chosen port differs from the configured one.
-            let configured = match svc {
-                Service::Apache => state.config.apache.port,
-                Service::Mysql => state.config.mysql.port,
-                Service::Php => state.config.php.port,
-            };
-            if port != configured {
+        Event::PortUnavailable { service: svc, port } => {
+            // Only act on a report for the attempt currently in flight. A late report
+            // from a previous attempt must not respawn or blacklist anything.
+            let in_flight = state.service(svc).state == ServiceState::Starting
+                && state.ports.assigned(svc) == Some(port);
+            if !in_flight {
                 effects.push(SideEffect::LogEvent(format!(
-                    "{svc}: configured port {configured} in use — using {port} instead"
+                    "{svc}: ignoring stale PortUnavailable for port {port}"
                 )));
+            } else {
+                state.ports.mark_unavailable(svc, port);
+                effects.push(SideEffect::LogEvent(format!(
+                    "{svc}: port {port} unavailable — trying the next one"
+                )));
+                match allocate_port(&state, svc) {
+                    Some(next) => {
+                        state.ports.assign(svc, next);
+                        effects.push(SideEffect::SpawnService {
+                            service: svc,
+                            port: next,
+                        });
+                        effects.push(SideEffect::StartReadinessCheck(svc));
+                    }
+                    None => {
+                        state.service_mut(svc).state = ServiceState::Error;
+                        state.clear_started_at(svc);
+                        state.service_mut(svc).last_error =
+                            Some("no free port within scan range".to_string());
+                        effects.push(SideEffect::LogEvent(format!(
+                            "{svc}: no free port within scan range → Error"
+                        )));
+                    }
+                }
             }
         }
 
@@ -292,8 +314,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                 && state.service(svc).desired == DesiredServiceState::Running
             {
                 state.set_starting(svc);
-                effects.push(SideEffect::SpawnService(svc));
-                effects.push(SideEffect::StartReadinessCheck(svc));
+                begin_start(&mut state, svc, &mut effects);
                 effects.push(SideEffect::LogEvent(format!("{svc}: auto-retry starting")));
             }
         }
@@ -434,7 +455,6 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
 }
 
 /// Configured (home) port for a service, straight from rampp.toml.
-#[allow(dead_code)] // wired up in task 8
 fn configured_port(state: &AppState, svc: Service) -> u16 {
     match svc {
         Service::Apache => state.config.apache.port,
@@ -448,12 +468,6 @@ fn configured_port(state: &AppState, svc: Service) -> u16 {
 /// Pure. Never returns a port assigned to, or configured for, another service —
 /// which is what keeps overlapping scan ranges (e.g. apache 8080 and php 8085,
 /// both scanning 20 upward) from colliding.
-///
-/// Not yet called from the reducer's StartService handling — that wiring is
-/// task 8, so this function is presently unused by `src/main.rs`'s standalone
-/// binary crate (which does not inherit `src/lib.rs`'s crate-wide
-/// `#![allow(dead_code)]`).
-#[allow(dead_code)] // wired up in task 8
 pub fn allocate_port(state: &AppState, svc: Service) -> Option<u16> {
     let start = configured_port(state, svc);
     let others: Vec<Service> = [Service::Apache, Service::Mysql, Service::Php]
@@ -476,6 +490,33 @@ pub fn allocate_port(state: &AppState, svc: Service) -> Option<u16> {
         return Some(candidate);
     }
     None
+}
+
+/// Begin a start attempt: clear the previous attempt's ledger entry, allocate a
+/// port, and either queue the spawn or fail with a port conflict.
+fn begin_start(state: &mut AppState, svc: Service, effects: &mut Vec<SideEffect>) {
+    state.ports.begin_attempt(svc);
+    match allocate_port(state, svc) {
+        Some(port) => {
+            state.ports.assign(svc, port);
+            if port != configured_port(state, svc) {
+                effects.push(SideEffect::LogEvent(format!(
+                    "{svc}: configured port {} in use — using {port} instead",
+                    configured_port(state, svc)
+                )));
+            }
+            effects.push(SideEffect::SpawnService { service: svc, port });
+            effects.push(SideEffect::StartReadinessCheck(svc));
+        }
+        None => {
+            state.service_mut(svc).state = ServiceState::Error;
+            state.clear_started_at(svc);
+            state.service_mut(svc).last_error = Some("no free port within scan range".to_string());
+            effects.push(SideEffect::LogEvent(format!(
+                "{svc}: no free port within scan range → Error"
+            )));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -526,9 +567,13 @@ mod tests {
         let state = make_state();
         let (new_state, effects) = reducer(state, Event::StartService(Service::Apache));
         assert_eq!(new_state.apache.state, ServiceState::Starting);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, SideEffect::SpawnService(Service::Apache))));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            SideEffect::SpawnService {
+                service: Service::Apache,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -585,9 +630,13 @@ mod tests {
         state.apache.desired = DesiredServiceState::Running;
         let (new_state, effects) = reducer(state, Event::AutoRetry(Service::Apache));
         assert_eq!(new_state.apache.state, ServiceState::Starting);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, SideEffect::SpawnService(Service::Apache))));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            SideEffect::SpawnService {
+                service: Service::Apache,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -625,9 +674,13 @@ mod tests {
         let (new_state, effects) = reducer(state, Event::StartService(Service::Apache));
         assert_eq!(new_state.apache.state, ServiceState::Starting);
         // No SpawnService should be emitted
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, SideEffect::SpawnService(Service::Apache))));
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            SideEffect::SpawnService {
+                service: Service::Apache,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -766,9 +819,13 @@ mod tests {
         let state = make_state();
         let (new_state, effects) = reducer(state, Event::StartService(Service::Php));
         assert_eq!(new_state.php.state, ServiceState::Starting);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, SideEffect::SpawnService(Service::Php))));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            SideEffect::SpawnService {
+                service: Service::Php,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -817,9 +874,10 @@ mod tests {
         // Must emit a log event confirming reload
         assert!(effects.iter().any(|e| matches!(e, SideEffect::LogEvent(_))));
         // Must NOT emit any spawn/kill — config reload is passive
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, SideEffect::SpawnService(_) | SideEffect::KillService(_))));
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            SideEffect::SpawnService { .. } | SideEffect::KillService(_)
+        )));
     }
 
     // ── RestartService edge cases ─────────────────────────────────────────
@@ -831,9 +889,13 @@ mod tests {
         let (new_state, effects) = reducer(state, Event::RestartService(Service::Apache));
         assert_eq!(new_state.apache.state, ServiceState::Starting);
         assert_eq!(new_state.apache.desired, DesiredServiceState::Running);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, SideEffect::SpawnService(Service::Apache))));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            SideEffect::SpawnService {
+                service: Service::Apache,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -867,9 +929,13 @@ mod tests {
         );
         // Should restart directly into Starting
         assert_eq!(new_state.apache.state, ServiceState::Starting);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, SideEffect::SpawnService(Service::Apache))));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            SideEffect::SpawnService {
+                service: Service::Apache,
+                ..
+            }
+        )));
     }
 
     // ── StopService edge cases ────────────────────────────────────────────
@@ -993,7 +1059,7 @@ mod tests {
         assert_eq!(new_state.apache.state, ServiceState::Stopped);
         assert!(!effects.iter().any(|e| matches!(
             e,
-            SideEffect::SpawnService(_) | SideEffect::ScheduleRetry { .. }
+            SideEffect::SpawnService { .. } | SideEffect::ScheduleRetry { .. }
         )));
     }
 
@@ -1367,7 +1433,7 @@ mod tests {
             );
             assert!(!effects
                 .iter()
-                .any(|e| matches!(e, SideEffect::SpawnService(_))));
+                .any(|e| matches!(e, SideEffect::SpawnService { .. })));
         }
     }
 
@@ -1493,5 +1559,134 @@ mod tests {
         assert_eq!(state.ports.assigned(Service::Mysql), Some(3307));
         state.ports.release(Service::Mysql);
         assert_eq!(state.ports.assigned(Service::Mysql), None);
+    }
+
+    // ── Ledger wiring (task 8) ────────────────────────────────────────────
+
+    fn spawn_port(effects: &[SideEffect]) -> Option<u16> {
+        effects.iter().find_map(|e| match e {
+            SideEffect::SpawnService { port, .. } => Some(*port),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn start_service_allocates_and_records_a_port() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        let (new_state, effects) = reducer(state, Event::StartService(Service::Apache));
+        assert_eq!(spawn_port(&effects), Some(8080));
+        assert_eq!(new_state.ports.assigned(Service::Apache), Some(8080));
+    }
+
+    #[test]
+    fn starting_all_three_never_assigns_the_same_port_twice() {
+        let mut state = make_state();
+        // Overlapping ranges: apache and php would both scan through 8085.
+        state.config.apache.port = 8080;
+        state.config.php.port = 8085;
+        state.config.mysql.port = 3306;
+        for svc in [Service::Apache, Service::Mysql, Service::Php] {
+            let (s, _) = reducer(state, Event::StartService(svc));
+            state = s;
+        }
+        let a = state.ports.assigned(Service::Apache).unwrap();
+        let m = state.ports.assigned(Service::Mysql).unwrap();
+        let p = state.ports.assigned(Service::Php).unwrap();
+        assert_ne!(a, m);
+        assert_ne!(a, p);
+        assert_ne!(m, p);
+    }
+
+    #[test]
+    fn port_unavailable_advances_to_the_next_candidate() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        let (state, effects) = reducer(
+            state,
+            Event::PortUnavailable {
+                service: Service::Apache,
+                port: 8080,
+            },
+        );
+        assert_eq!(spawn_port(&effects), Some(8081));
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8081));
+        assert_eq!(
+            state.apache.state,
+            ServiceState::Starting,
+            "still starting — a blocked port is not a crash"
+        );
+    }
+
+    #[test]
+    fn stale_port_unavailable_for_a_different_port_is_ignored() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        let (state, effects) = reducer(
+            state,
+            Event::PortUnavailable {
+                service: Service::Apache,
+                port: 9999,
+            },
+        );
+        assert!(
+            spawn_port(&effects).is_none(),
+            "must not respawn on a stale report"
+        );
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8080));
+    }
+
+    #[test]
+    fn port_unavailable_is_ignored_when_the_service_is_not_starting() {
+        let state = make_state();
+        let (new_state, effects) = reducer(
+            state,
+            Event::PortUnavailable {
+                service: Service::Apache,
+                port: 8080,
+            },
+        );
+        assert!(spawn_port(&effects).is_none());
+        assert_eq!(new_state.apache.state, ServiceState::Stopped);
+    }
+
+    #[test]
+    fn exhausting_the_scan_range_reaches_error() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        let (mut state, _) = reducer(state, Event::StartService(Service::Apache));
+        for offset in 0..=PORT_SCAN_RANGE {
+            let port = state
+                .ports
+                .assigned(Service::Apache)
+                .unwrap_or(8080 + offset);
+            let (s, _) = reducer(
+                state,
+                Event::PortUnavailable {
+                    service: Service::Apache,
+                    port,
+                },
+            );
+            state = s;
+        }
+        assert_eq!(state.apache.state, ServiceState::Error);
+    }
+
+    #[test]
+    fn stopping_releases_the_assigned_port() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        let (state, _) = reducer(state, Event::StopService(Service::Apache));
+        let (state, _) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Apache,
+                exit_code: Some(0),
+            },
+        );
+        assert_eq!(state.ports.assigned(Service::Apache), None);
     }
 }

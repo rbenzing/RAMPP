@@ -5,8 +5,8 @@ use crate::health::{poll_until_ready, run_health_checker};
 use crate::logger::SharedLog;
 use crate::mysql_conf::rewrite_my_ini_with_port;
 use crate::phpmyadmin_conf;
-use crate::process::{find_available_port, spawn_service, ServiceProcess};
-use crate::state::{AppState, PersistedState, RampConfig, Service, PORT_SCAN_RANGE};
+use crate::process::{spawn_service, ServiceProcess};
+use crate::state::{AppState, PersistedState, RampConfig, Service};
 use crossbeam_channel::Sender;
 use std::collections::HashMap;
 
@@ -30,10 +30,6 @@ pub struct Executor {
     tx: Sender<Event>,
     log: SharedLog,
     handles: HashMap<Service, ServiceHandles>,
-    /// Effective port per service — set when do_spawn resolves a free port.
-    /// Used by readiness/health checks and by config regen for cross-service ports
-    /// (e.g. Apache's httpd.conf needs PHP's effective port for the FastCGI proxy).
-    effective_ports: HashMap<Service, u16>,
 }
 
 impl Executor {
@@ -43,24 +39,15 @@ impl Executor {
             tx,
             log,
             handles: HashMap::new(),
-            effective_ports: HashMap::new(),
         }
-    }
-
-    /// Effective port to bind/probe — falls back to the configured port until a spawn resolves one.
-    fn effective_port(&self, svc: Service) -> u16 {
-        self.effective_ports
-            .get(&svc)
-            .copied()
-            .unwrap_or_else(|| self.port(svc))
     }
 
     pub fn execute(&mut self, effects: Vec<SideEffect>, state: &AppState) {
         for effect in effects {
             match effect {
-                SideEffect::SpawnService(svc) => self.do_spawn(svc),
+                SideEffect::SpawnService { service, port } => self.do_spawn(service, port, state),
                 SideEffect::KillService(svc) => self.do_kill(svc),
-                SideEffect::StartReadinessCheck(svc) => self.do_readiness_check(svc),
+                SideEffect::StartReadinessCheck(svc) => self.do_readiness_check(svc, state),
                 SideEffect::StopHealthCheck(svc) => self.do_stop_health(svc),
                 SideEffect::ScheduleRetry { service, delay } => {
                     self.do_schedule_retry(service, delay)
@@ -72,15 +59,15 @@ impl Executor {
                 SideEffect::PersistDesiredState => self.do_persist(state),
                 SideEffect::PersistConfig => self.do_persist_config(state),
                 SideEffect::TogglePhpMyAdmin(enable) => self.do_toggle_phpmyadmin(enable, state),
-                SideEffect::OpenPhpMyAdminBrowser => self.do_open_phpmyadmin_browser(),
+                SideEffect::OpenPhpMyAdminBrowser => self.do_open_phpmyadmin_browser(state),
             }
         }
     }
 
     /// Start health checks for a service that just became Running.
-    pub fn start_health_check(&mut self, svc: Service) {
+    pub fn start_health_check(&mut self, svc: Service, state: &AppState) {
         self.do_stop_health(svc);
-        let port = self.effective_port(svc);
+        let port = state.ports.assigned(svc).unwrap_or_else(|| self.port(svc));
         let (stop_tx, stop_rx) = crossbeam_channel::bounded(1);
         let entry = self.handles.entry(svc).or_insert_with(|| {
             let (kill_tx, _) = crossbeam_channel::bounded(1);
@@ -97,17 +84,13 @@ impl Executor {
         entry.health_join = Some(join);
     }
 
-    fn do_spawn(&mut self, svc: Service) {
-        let configured = self.port(svc);
-
-        // Scan upward for a free port. None → every port in the range is occupied.
-        let chosen = match find_available_port(configured, PORT_SCAN_RANGE) {
-            Some(p) => p,
-            None => {
-                let _ = self.tx.send(Event::PortConflictDetected(svc));
-                return;
-            }
-        };
+    /// Spawn a service on the port the reducer allocated. The executor no longer
+    /// chooses ports — it verifies the reducer's choice and reports failure.
+    fn do_spawn(&mut self, svc: Service, port: u16, state: &AppState) {
+        if !crate::process::check_port_available(port) {
+            let _ = self.tx.send(Event::PortUnavailable { service: svc, port });
+            return;
+        }
 
         // Always regenerate the service config file from the chosen port. This is
         // critical: skipping the rewrite when chosen == configured leaves any stale
@@ -117,16 +100,19 @@ impl Executor {
         // port is a CLI flag.
         let result = match svc {
             Service::Apache => {
-                let php_port = self.effective_port(Service::Php);
-                rewrite_httpd_conf_with_ports(&self.config, chosen, php_port)
+                let php_port = state
+                    .ports
+                    .assigned(Service::Php)
+                    .unwrap_or_else(|| self.port(Service::Php));
+                rewrite_httpd_conf_with_ports(&self.config, port, php_port)
             }
-            Service::Mysql => rewrite_my_ini_with_port(&self.config, chosen),
+            Service::Mysql => rewrite_my_ini_with_port(&self.config, port),
             Service::Php => Ok(()),
         };
         if let Err(reason) = result {
             let _ = self.tx.send(Event::ProcessSpawnFailed {
                 service: svc,
-                reason: format!("config regen for port {chosen}: {reason}"),
+                reason: format!("config regen for port {port}: {reason}"),
             });
             return;
         }
@@ -134,27 +120,23 @@ impl Executor {
         // If this is PHP and Apache is currently running, refresh httpd.conf so the
         // FastCGI proxy points at PHP's chosen port. Apache stays on its current port.
         if svc == Service::Php && self.handles.contains_key(&Service::Apache) {
-            let apache_port = self.effective_port(Service::Apache);
-            if let Err(reason) = rewrite_httpd_conf_with_ports(&self.config, apache_port, chosen) {
+            let apache_port = state
+                .ports
+                .assigned(Service::Apache)
+                .unwrap_or_else(|| self.port(Service::Apache));
+            if let Err(reason) = rewrite_httpd_conf_with_ports(&self.config, apache_port, port) {
                 self.log.push(format!(
                     "warn: could not refresh httpd.conf for new PHP port: {reason}"
                 ));
             }
         }
 
-        // Record the resolution before spawn so later emits/queries see it.
-        self.effective_ports.insert(svc, chosen);
-        let _ = self.tx.send(Event::PortAssigned {
-            service: svc,
-            port: chosen,
-        });
-
         // Kill any existing handles for this service
         self.do_kill(svc);
 
         let (kill_tx, kill_rx) = crossbeam_channel::bounded::<()>(1);
 
-        match spawn_service(svc, &self.config, chosen, self.tx.clone()) {
+        match spawn_service(svc, &self.config, port, self.tx.clone()) {
             Ok(proc) => {
                 let tx = self.tx.clone();
                 let error_log = if svc == Service::Mysql {
@@ -197,8 +179,8 @@ impl Executor {
         }
     }
 
-    fn do_readiness_check(&self, svc: Service) {
-        let port = self.effective_port(svc);
+    fn do_readiness_check(&self, svc: Service, state: &AppState) {
+        let port = state.ports.assigned(svc).unwrap_or_else(|| self.port(svc));
         let tx = self.tx.clone();
         std::thread::spawn(move || poll_until_ready(svc, port, tx));
     }
@@ -277,7 +259,6 @@ impl Executor {
     }
 
     fn do_toggle_phpmyadmin(&mut self, enable: bool, state: &AppState) {
-        let _ = state; // state not needed here but kept for signature symmetry
         let pma_dir = self.config.install_dir.join("phpmyadmin");
 
         if enable && !pma_dir.exists() {
@@ -290,7 +271,10 @@ impl Executor {
             return;
         }
 
-        let php_port = self.effective_port(Service::Php);
+        let php_port = state
+            .ports
+            .assigned(Service::Php)
+            .unwrap_or_else(|| self.port(Service::Php));
 
         if enable {
             let config_path = pma_dir.join("config.inc.php");
@@ -299,7 +283,10 @@ impl Executor {
 
             if should_write {
                 let blowfish_secret = self.load_or_generate_blowfish_secret();
-                let mysql_port = self.effective_port(Service::Mysql);
+                let mysql_port = state
+                    .ports
+                    .assigned(Service::Mysql)
+                    .unwrap_or_else(|| self.port(Service::Mysql));
                 let content = phpmyadmin_conf::generate_config_inc_php(
                     &self.config.install_dir,
                     mysql_port,
@@ -338,8 +325,11 @@ impl Executor {
         // after the restart, so we always use the correct (possibly port-rotated) port.
     }
 
-    fn do_open_phpmyadmin_browser(&mut self) {
-        let apache_port = self.effective_port(Service::Apache);
+    fn do_open_phpmyadmin_browser(&mut self, state: &AppState) {
+        let apache_port = state
+            .ports
+            .assigned(Service::Apache)
+            .unwrap_or_else(|| self.port(Service::Apache));
         let url = format!("http://127.0.0.1:{apache_port}/phpmyadmin/");
         log::info!("phpMyAdmin: opening {url}");
         self.log.push(format!("phpMyAdmin: opening {url}"));

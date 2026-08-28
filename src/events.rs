@@ -28,9 +28,10 @@ pub enum Event {
 
     // Port management
     PortConflictDetected(Service),
-    /// Executor resolved the port the service will actually bind to.
-    /// Emitted before a successful spawn so the UI/reducer know the chosen port.
-    PortAssigned {
+    /// A port the reducer allocated could not be used — the pre-check found a
+    /// listener, the bind failed, or the error log was diagnosed as a bind
+    /// failure. The reducer blacklists it and allocates the next candidate.
+    PortUnavailable {
         service: Service,
         port: u16,
     },
@@ -69,7 +70,10 @@ pub enum Event {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum SideEffect {
-    SpawnService(Service),
+    SpawnService {
+        service: Service,
+        port: u16,
+    },
     KillService(Service),
     ScheduleRetry {
         service: Service,

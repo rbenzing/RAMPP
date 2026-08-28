@@ -301,18 +301,6 @@ pub fn check_port_available(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err()
 }
 
-/// Scan upward from `start` for the first free port, up to `start + range` inclusive.
-/// Returns None if every port in the range is occupied.
-pub fn find_available_port(start: u16, range: u16) -> Option<u16> {
-    for offset in 0..=range {
-        let port = start.checked_add(offset)?;
-        if check_port_available(port) {
-            return Some(port);
-        }
-    }
-    None
-}
-
 fn service_params(
     svc: Service,
     cfg: &RampConfig,

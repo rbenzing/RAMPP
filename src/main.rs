@@ -270,13 +270,13 @@ fn main() {
 
             // Start health checks when a service first reaches Running
             if apache_was != ServiceState::Running && state.apache.state == ServiceState::Running {
-                executor.start_health_check(Service::Apache);
+                executor.start_health_check(Service::Apache, &state);
             }
             if mysql_was != ServiceState::Running && state.mysql.state == ServiceState::Running {
-                executor.start_health_check(Service::Mysql);
+                executor.start_health_check(Service::Mysql, &state);
             }
             if php_was != ServiceState::Running && state.php.state == ServiceState::Running {
-                executor.start_health_check(Service::Php);
+                executor.start_health_check(Service::Php, &state);
             }
 
             executor.execute(effects, &state);
