@@ -300,6 +300,12 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                         state.clear_started_at(svc);
                         state.service_mut(svc).last_error =
                             Some("no free port within scan range".to_string());
+                        // Unlike begin_start's None branch, begin_attempt was never called
+                        // here (it would have erased the blacklist we just built), so
+                        // `assigned` still holds the port we just proved unavailable.
+                        // Release it explicitly or it keeps excluding that dead port from
+                        // every other service's candidate range indefinitely.
+                        state.ports.release(svc);
                         effects.push(SideEffect::LogEvent(format!(
                             "{svc}: no free port within scan range → Error"
                         )));
@@ -1672,6 +1678,12 @@ mod tests {
             state = s;
         }
         assert_eq!(state.apache.state, ServiceState::Error);
+        assert_eq!(
+            state.ports.assigned(Service::Apache),
+            None,
+            "a dead, definitively-unavailable port must not stay in the ledger — it would \
+             keep excluding that port from every other service's candidate range forever"
+        );
     }
 
     #[test]
