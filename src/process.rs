@@ -368,3 +368,97 @@ fn php_env(cfg: &RampConfig) -> Vec<(String, String)> {
         ("PHP_FCGI_MAX_REQUESTS".into(), "500".into()),
     ]
 }
+
+/// What a service's error log says about why it exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // wired up in task 12
+pub enum ExitDiagnosis {
+    /// The service could not bind its port. `reserved` means Windows refused the
+    /// bind outright (WSAEACCES), which usually means the port sits inside an
+    /// excluded port range reserved by Hyper-V, WSL2 or Docker Desktop — those
+    /// are invisible to a connect-based availability check.
+    PortBindFailure {
+        reserved: bool,
+    },
+    Unknown,
+}
+
+/// Classify a service exit from the tail of its error log. Pure — the caller is
+/// responsible for reading only the bytes this run produced.
+#[allow(dead_code)] // wired up in task 12
+pub fn diagnose_exit(svc: Service, log_tail: &str) -> ExitDiagnosis {
+    let lower = log_tail.to_lowercase();
+
+    let bind_failed = match svc {
+        Service::Apache => lower.contains("ah00072") || lower.contains("make_sock: could not bind"),
+        Service::Mysql => lower.contains("can't start server: bind on tcp/ip port"),
+        // PHP-CGI writes bind errors to stderr, not php_errors.log, so there is
+        // no reliable signature to match. Fall through to Unknown.
+        Service::Php => false,
+    };
+
+    if !bind_failed {
+        return ExitDiagnosis::Unknown;
+    }
+
+    let reserved = lower.contains("10013")
+        || lower.contains("wsaeacces")
+        || lower.contains("forbidden by its access permissions");
+
+    ExitDiagnosis::PortBindFailure { reserved }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apache_bind_failure_is_recognized() {
+        let tail = "[crit] (OS 10048)Only one usage of each socket address \
+                    is normally permitted.  : AH00072: make_sock: could not bind to \
+                    address 127.0.0.1:8080";
+        assert!(matches!(
+            diagnose_exit(Service::Apache, tail),
+            ExitDiagnosis::PortBindFailure { reserved: false }
+        ));
+    }
+
+    #[test]
+    fn apache_reserved_range_failure_is_flagged() {
+        let tail = "(OS 10013)An attempt was made to access a socket in a way \
+                    forbidden by its access permissions.  : AH00072: make_sock: \
+                    could not bind to address 127.0.0.1:8080";
+        assert!(matches!(
+            diagnose_exit(Service::Apache, tail),
+            ExitDiagnosis::PortBindFailure { reserved: true }
+        ));
+    }
+
+    #[test]
+    fn mysql_bind_failure_is_recognized() {
+        let tail = "[ERROR] [MY-010262] [Server] Can't start server: Bind on TCP/IP \
+                    port: An attempt was made to access a socket in a way forbidden \
+                    by its access permissions.";
+        assert!(matches!(
+            diagnose_exit(Service::Mysql, tail),
+            ExitDiagnosis::PortBindFailure { reserved: true }
+        ));
+    }
+
+    #[test]
+    fn unrelated_crash_is_not_a_bind_failure() {
+        let tail = "[ERROR] [MY-012574] [InnoDB] Unable to lock ./ibdata1 error: 11";
+        assert!(matches!(
+            diagnose_exit(Service::Mysql, tail),
+            ExitDiagnosis::Unknown
+        ));
+    }
+
+    #[test]
+    fn empty_log_is_not_a_bind_failure() {
+        assert!(matches!(
+            diagnose_exit(Service::Apache, ""),
+            ExitDiagnosis::Unknown
+        ));
+    }
+}
