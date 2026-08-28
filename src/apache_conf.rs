@@ -1,6 +1,6 @@
 use crate::state::{
     RampConfig, HEALTH_ENDPOINT_BODY, HEALTH_ENDPOINT_DIR, HEALTH_ENDPOINT_FILE,
-    HEALTH_ENDPOINT_PATH,
+    HEALTH_ENDPOINT_PATH, PROXY_TIMEOUT_SECS,
 };
 use std::path::PathBuf;
 
@@ -42,6 +42,7 @@ pub fn generate_httpd_conf_with_ports(cfg: &RampConfig, port: u16, php_port: u16
         .display()
         .to_string()
         .replace('\\', "/");
+    let proxy_timeout = PROXY_TIMEOUT_SECS;
 
     format!(
         r#"# RAMPP — generated httpd.conf (do not remove this line — RAMPP uses it to detect generated configs)
@@ -131,6 +132,16 @@ DocumentRoot "{doc_root}"
 #   It tells mod_proxy_fcgi to not apply PHP-FPM-specific SCRIPT_FILENAME
 #   mangling (which on Windows would re-introduce the corruption) and to
 #   strip the "proxy:fcgi://" prefix that PHP-CGI cannot handle (unlike FPM).
+#
+# Declare the FastCGI worker explicitly so ProxySet can configure it.
+#
+# retry=0 is the important part: by default Apache marks a failed proxy worker
+# dead for 60 seconds, so every PHP-CGI restart caused a full minute of 503s on
+# every .php request even after PHP was healthy again.
+<Proxy "fcgi://127.0.0.1:{php_port}">
+    ProxySet retry=0 timeout={proxy_timeout}
+</Proxy>
+
 <FilesMatch "\.php$">
     SetHandler "proxy:fcgi://127.0.0.1:{php_port}//./"
     ProxyFCGIBackendType GENERIC
@@ -144,9 +155,13 @@ DocumentRoot "{doc_root}"
 ErrorLog "{logs_dir}/apache_error.log"
 LogLevel warn
 
+Timeout {proxy_timeout}
+
 <IfModule log_config_module>
     LogFormat "%h %l %u %t \"%r\" %>s %b" common
-    CustomLog "{logs_dir}/apache_access.log" common
+    # The readiness probe runs every 2 seconds forever — keep it out of the log.
+    SetEnvIf Request_URI "^{health_url}$" ramp_health
+    CustomLog "{logs_dir}/apache_access.log" common env=!ramp_health
 </IfModule>
 
 <IfModule mime_module>
@@ -156,7 +171,7 @@ LogLevel warn
 </IfModule>
 
 # phpMyAdmin — managed by RAMPP (do not remove this line)
-Include "conf/phpmyadmin.conf"
+IncludeOptional "conf/phpmyadmin.conf"
 "#
     )
 }
@@ -529,8 +544,47 @@ mod tests {
         let cfg = test_cfg(tmp.path());
         let conf = generate_httpd_conf(&cfg);
         assert!(
-            conf.contains(r#"Include "conf/phpmyadmin.conf""#),
+            conf.contains(r#"IncludeOptional "conf/phpmyadmin.conf""#),
             "httpd.conf must include phpmyadmin.conf"
+        );
+    }
+
+    #[test]
+    fn phpmyadmin_include_is_optional() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let conf = generate_httpd_conf(&cfg);
+        assert!(
+            conf.contains(r#"IncludeOptional "conf/phpmyadmin.conf""#),
+            "a missing phpmyadmin.conf must not stop Apache from starting"
+        );
+        assert!(!conf.contains(r#"Include "conf/phpmyadmin.conf""#));
+    }
+
+    #[test]
+    fn fastcgi_worker_disables_retry_blackout() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let conf = generate_httpd_conf_with_ports(&cfg, 8080, 9000);
+        assert!(
+            conf.contains(r#"<Proxy "fcgi://127.0.0.1:9000">"#),
+            "the worker must be declared so ProxySet can reach it"
+        );
+        assert!(
+            conf.contains("ProxySet retry=0"),
+            "without retry=0 Apache marks the worker dead for 60s after PHP restarts"
+        );
+    }
+
+    #[test]
+    fn health_probe_is_excluded_from_the_access_log() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let conf = generate_httpd_conf(&cfg);
+        assert!(conf.contains(r#"SetEnvIf Request_URI "^/__ramp_health$" ramp_health"#));
+        assert!(
+            conf.contains("env=!ramp_health"),
+            "the 2s probe must not be logged forever"
         );
     }
 
