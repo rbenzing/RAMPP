@@ -280,6 +280,16 @@ pub const HEALTH_FAIL_THRESHOLD: u32 = 3;
 /// Apache `Timeout` and the FastCGI worker timeout. Sits above php.ini's
 /// `max_execution_time = 30` with margin so PHP decides its own limit.
 pub const PROXY_TIMEOUT_SECS: u64 = 60;
-#[allow(dead_code)]
-pub const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
+pub const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(15);
 pub const COMMAND_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Budget for a clean `mysqladmin shutdown` before RAMPP falls back to closing
+/// the Job Object. A loopback shutdown normally completes well under a second.
+///
+/// Not yet consumed by `Executor::do_kill` — that wiring is a later task. Until
+/// then this constant is unused by `src/main.rs`'s standalone binary crate
+/// (which does not inherit `src/lib.rs`'s crate-wide `#![allow(dead_code)]`),
+/// so the attribute below is load-bearing there even though the equivalent
+/// lib-crate compilation never needs it.
+#[allow(dead_code)]
+pub const MYSQL_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);

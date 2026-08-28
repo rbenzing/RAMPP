@@ -17,6 +17,7 @@ pub struct InstallPaths {
     pub apache_health_dir: PathBuf,
     pub apache_health_file: PathBuf,
     pub mysql_bin: PathBuf,
+    pub mysqladmin_bin: PathBuf,
     pub mysql_data: PathBuf,
     pub mysql_ini: PathBuf,
     pub php_bin: PathBuf,
@@ -55,6 +56,7 @@ impl InstallPaths {
                 .join(HEALTH_ENDPOINT_DIR)
                 .join(HEALTH_ENDPOINT_FILE),
             mysql_bin: root.join("mysql").join("bin").join("mysqld.exe"),
+            mysqladmin_bin: root.join("mysql").join("bin").join("mysqladmin.exe"),
             mysql_data: root.join("mysql").join("data"),
             mysql_ini: root.join("mysql").join("my.ini"),
             php_bin: root.join("php").join("php-cgi.exe"),
@@ -455,5 +457,11 @@ mod tests {
         let result = validate_document_root(&link);
         assert!(result.is_err(), "symlink document_root must be rejected");
         assert!(result.unwrap_err().contains("symlink"));
+    }
+
+    #[test]
+    fn install_paths_include_mysqladmin() {
+        let paths = InstallPaths::from_install_dir(Path::new("C:\\rampp")).unwrap();
+        assert!(paths.mysqladmin_bin.ends_with("mysqladmin.exe"));
     }
 }

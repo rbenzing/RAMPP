@@ -26,6 +26,8 @@ basedir     = "{mysql_dir}"
 datadir     = "{data_dir}"
 port        = {port}
 bind-address = 127.0.0.1
+# Loopback only — reverse DNS on every connection is pure latency and can stall.
+skip-name-resolve
 
 # Character set
 character-set-server  = utf8mb4
@@ -145,6 +147,63 @@ pub fn needs_initialization(cfg: &RampConfig) -> bool {
     !data_dir.join("ibdata1").exists() && !data_dir.join("mysql").exists()
 }
 
+/// Ask mysqld to shut down cleanly so InnoDB does not perform crash recovery on
+/// the next start.
+///
+/// Best-effort only. The caller MUST still close the Job Object afterwards — that
+/// remains the termination guarantee and the no-orphan invariant.
+///
+/// Not yet called from `Executor::do_kill` — that wiring is a later task, so this
+/// function is presently unused by `src/main.rs`'s standalone binary crate (which
+/// does not inherit `src/lib.rs`'s crate-wide `#![allow(dead_code)]`).
+#[allow(dead_code)]
+pub fn graceful_shutdown(
+    cfg: &RampConfig,
+    port: u16,
+    grace: std::time::Duration,
+) -> Result<(), String> {
+    let paths = crate::paths::InstallPaths::from_install_dir(&cfg.install_dir)?;
+    let bin = paths.mysqladmin_bin;
+    if !bin.exists() {
+        return Err(format!("mysqladmin not found at {}", bin.display()));
+    }
+
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("--protocol=TCP")
+        .arg("--host=127.0.0.1")
+        .arg(format!("--port={port}"))
+        .arg(format!("--user={}", cfg.phpmyadmin.mysql_user))
+        .arg("--connect-timeout=2")
+        .arg("shutdown")
+        .current_dir(&cfg.install_dir)
+        .env_clear()
+        .env("SystemRoot", crate::paths::system_root())
+        // Password via env, never argv — argv is visible in the process list.
+        .env("MYSQL_PWD", &cfg.phpmyadmin.mysql_password);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("cannot run mysqladmin shutdown: {e}"))?;
+
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!("mysqladmin shutdown exited {:?}", status.code()))
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return Err(format!("mysqladmin shutdown timed out after {grace:?}"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("waiting on mysqladmin failed: {e}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +279,28 @@ mod tests {
         std::fs::create_dir_all(&cfg.mysql.data_dir).unwrap();
         std::fs::write(cfg.mysql.data_dir.join("ibdata1"), b"").unwrap();
         assert!(!needs_initialization(&cfg));
+    }
+
+    #[test]
+    fn my_ini_skips_name_resolution() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let ini = generate_my_ini(&cfg);
+        assert!(
+            ini.contains("skip-name-resolve"),
+            "RAMPP binds loopback only; reverse DNS is pure latency and a stall source"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_errors_when_mysqladmin_is_missing() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let err = graceful_shutdown(&cfg, 3306, std::time::Duration::from_millis(200))
+            .expect_err("must not panic or succeed without the binary");
+        assert!(
+            err.contains("mysqladmin"),
+            "error should name the tool: {err}"
+        );
     }
 }
