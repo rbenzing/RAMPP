@@ -104,11 +104,29 @@ fn apache_ready_budget_survives_multiple_stalled_probes() {
     );
 }
 
-/// check_php_ready returns true when a TCP listener is present on the port.
+/// check_php_ready returns true when the listener actually speaks FastCGI.
+///
+/// A bare accept-and-drop is no longer sufficient: php-cgi.exe on Windows serves
+/// requests serially, so a probe that just opens and closes a socket contends
+/// with real traffic. The probe now sends FCGI_GET_VALUES and requires a real
+/// FastCGI reply (FCGI_GET_VALUES_RESULT here) before calling the port ready.
 #[test]
-fn check_php_ready_true_when_port_open() {
-    let (_listener, port) = bind_random();
-    assert!(check_php_ready(port), "should be ready with listener bound");
+fn check_php_ready_true_when_fastcgi_responds() {
+    let (listener, port) = bind_random();
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0u8; 256];
+            let _ = sock.read(&mut buf);
+            // FastCGI response header: version 1, FCGI_GET_VALUES_RESULT, request id 0.
+            let _ = sock.write_all(&[1, 10, 0, 0, 0, 0, 0, 0]);
+            let _ = sock.flush();
+        }
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        check_php_ready(port),
+        "should be ready when the listener answers with a valid FastCGI record"
+    );
 }
 
 /// check_php_ready returns false when nothing is listening.
@@ -124,11 +142,12 @@ fn check_php_ready_false_when_no_listener() {
 }
 
 /// check_mysql_ready returns false for a port with a plain TCP listener
-/// (no MySQL greeting bytes) — the function checks for 4 bytes of data.
+/// that never sends a MySQL greeting packet.
 #[test]
 fn check_mysql_ready_false_for_plain_tcp() {
     let (listener, port) = bind_random();
-    // Accept in a thread but send no data — MySQL check reads 4 bytes.
+    // Accept in a thread but send no data — probe_mysql reads the 4-byte
+    // packet header before it can read a payload.
     std::thread::spawn(move || {
         if let Ok((_stream, _)) = listener.accept() {
             // Intentionally send nothing — check_mysql_ready should fail.
@@ -182,12 +201,18 @@ fn poll_until_ready_resolves_when_port_opens() {
         // l drops here, releasing the port
     };
 
-    // Open the listener after a short delay so poll_until_ready has to wait.
+    // Open a FastCGI-speaking listener after a short delay so poll_until_ready
+    // has to wait, then answer the FCGI_GET_VALUES probe once accepted.
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
-        // Bind and hold open long enough for the check to succeed.
-        let _listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
-        std::thread::sleep(Duration::from_millis(500));
+        let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0u8; 256];
+            let _ = sock.read(&mut buf);
+            // FastCGI response header: version 1, FCGI_GET_VALUES_RESULT, request id 0.
+            let _ = sock.write_all(&[1, 10, 0, 0, 0, 0, 0, 0]);
+            let _ = sock.flush();
+        }
     });
 
     poll_until_ready(Service::Php, port, tx);
