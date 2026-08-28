@@ -202,6 +202,32 @@ impl PortState {
     }
 }
 
+/// Every config file RAMPP generates and owns.
+// Not yet consumed by `src/main.rs`'s standalone binary crate (which does not
+// inherit `src/lib.rs`'s crate-wide `#![allow(dead_code)]`) — task 10 wires
+// `provision` into the executor and `main.rs`.
+#[allow(dead_code)] // wired up in task 10
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedFile {
+    HttpdConf,
+    MyIni,
+    PhpIni,
+    PhpMyAdminConf,
+    PhpMyAdminConfigInc,
+}
+
+impl std::fmt::Display for ManagedFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManagedFile::HttpdConf => write!(f, "apache/conf/httpd.conf"),
+            ManagedFile::MyIni => write!(f, "mysql/my.ini"),
+            ManagedFile::PhpIni => write!(f, "php/php.ini"),
+            ManagedFile::PhpMyAdminConf => write!(f, "apache/conf/phpmyadmin.conf"),
+            ManagedFile::PhpMyAdminConfigInc => write!(f, "phpmyadmin/config.inc.php"),
+        }
+    }
+}
+
 /// The complete application state. Owned exclusively by the reducer.
 /// Never mutated outside of reducer(state, event) → (state, effects).
 #[allow(dead_code)]

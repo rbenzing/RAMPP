@@ -11,6 +11,7 @@ mod paths;
 mod php_conf;
 mod phpmyadmin_conf;
 mod process;
+mod provision;
 mod reducer;
 mod state;
 mod tray;

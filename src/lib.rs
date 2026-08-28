@@ -10,6 +10,7 @@ pub mod health;
 pub mod logger;
 pub mod paths;
 pub mod process;
+pub mod provision;
 pub mod reducer;
 pub mod state;
 

@@ -3,6 +3,12 @@ use crate::state::RampConfig;
 /// Generate a minimal php.ini for PHP-CGI running under RAMPP.
 /// Only called when the file does not already exist.
 pub fn generate_php_ini(cfg: &RampConfig) -> String {
+    generate_php_ini_with_port(cfg, cfg.mysql.port)
+}
+
+/// Same as `generate_php_ini` but with an explicit MySQL port — used by the
+/// reconciler so `mysqli.default_port` follows MySQL's real port.
+pub fn generate_php_ini_with_port(cfg: &RampConfig, mysql_port: u16) -> String {
     let php_dir = cfg.install_dir.join("php");
     let ext_dir = php_dir.join("ext");
     let ext_dir_s = ext_dir.display().to_string().replace('\\', "/");
@@ -152,7 +158,7 @@ session.sid_bits_per_character = 5
         ext_dir = ext_dir_s,
         logs_dir = logs_dir,
         session_dir = session_dir,
-        mysql_port = cfg.mysql.port,
+        mysql_port = mysql_port,
     )
 }
 
