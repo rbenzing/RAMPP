@@ -184,23 +184,79 @@ fn validate_and_build(doc: TomlRoot, install_dir: &Path) -> Result<RampConfig, S
     })
 }
 
+/// Rename can transiently fail on Windows when an antivirus scanner or the search
+/// indexer holds the destination open. Retry briefly rather than surfacing a
+/// spurious config-write failure.
+const RENAME_ATTEMPTS: usize = 3;
+const RENAME_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Atomic write: temp file → fsync → rename. Never corrupts the target.
+///
+/// The temp path APPENDS `.tmp` rather than replacing the extension. Replacing it
+/// made `rampp.toml` and `rampp.state` both resolve to `rampp.tmp`, so the two
+/// writers shared a scratch file.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("path has no parent")?;
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("cannot create dir {}: {e}", dir.display()))?;
 
-    let tmp = path.with_extension("tmp");
-    {
+    let file_name = path
+        .file_name()
+        .ok_or("path has no file name")?
+        .to_string_lossy()
+        .to_string();
+    let tmp = dir.join(format!("{file_name}.tmp"));
+
+    let write_result = (|| -> Result<(), String> {
         let mut f =
             std::fs::File::create(&tmp).map_err(|e| format!("cannot create temp file: {e}"))?;
         f.write_all(data)
             .map_err(|e| format!("write failed: {e}"))?;
         f.flush().map_err(|e| format!("flush failed: {e}"))?;
         f.sync_all().map_err(|e| format!("fsync failed: {e}"))?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    std::fs::rename(&tmp, path).map_err(|e| format!("atomic rename failed: {e}"))?;
-    Ok(())
+
+    let mut last_err = String::new();
+    for attempt in 0..RENAME_ATTEMPTS {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = format!("atomic rename failed: {e}");
+                if attempt + 1 < RENAME_ATTEMPTS {
+                    std::thread::sleep(RENAME_BACKOFF);
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(last_err)
+}
+
+/// Read `rampp.state`, falling back to the all-stopped default when the file is
+/// absent or unparsable. Never fails — a missing state file is a normal first run.
+#[allow(dead_code)]
+pub fn read_persisted_state(path: &Path) -> crate::state::PersistedState {
+    std::fs::read(path)
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_else(crate::state::PersistedState::default_stopped)
+}
+
+/// Persist `rampp.state` atomically.
+#[allow(dead_code)]
+pub fn write_persisted_state(
+    path: &Path,
+    state: &crate::state::PersistedState,
+) -> Result<(), String> {
+    let data =
+        serde_json::to_vec_pretty(state).map_err(|e| format!("serialize state failed: {e}"))?;
+    atomic_write(path, &data)
 }
 
 #[cfg(test)]
@@ -580,5 +636,64 @@ port = 9000
         assert_eq!(reloaded.apache.document_root, custom);
         assert_eq!(reloaded.apache.port, cfg.apache.port);
         assert_eq!(reloaded.php.port, cfg.php.port);
+    }
+
+    #[test]
+    fn atomic_write_temp_path_does_not_collide_across_extensions() {
+        let tmp = TempDir::new().unwrap();
+        let toml_path = tmp.path().join("rampp.toml");
+        let state_path = tmp.path().join("rampp.state");
+        atomic_write(&toml_path, b"toml-content").unwrap();
+        atomic_write(&state_path, b"state-content").unwrap();
+        // Before the fix both resolved to "rampp.tmp".
+        assert_eq!(std::fs::read(&toml_path).unwrap(), b"toml-content");
+        assert_eq!(std::fs::read(&state_path).unwrap(), b"state-content");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_file_behind() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rampp.toml");
+        atomic_write(&path, b"x").unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn read_persisted_state_defaults_when_file_absent() {
+        let tmp = TempDir::new().unwrap();
+        let p = read_persisted_state(&tmp.path().join("nope.state"));
+        assert_eq!(p.apache_desired, crate::state::DesiredServiceState::Stopped);
+        assert!(p.phpmyadmin_blowfish_secret.is_none());
+    }
+
+    #[test]
+    fn read_persisted_state_defaults_when_file_is_garbage() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rampp.state");
+        std::fs::write(&path, b"not json at all").unwrap();
+        let p = read_persisted_state(&path);
+        assert!(p.phpmyadmin_blowfish_secret.is_none());
+    }
+
+    #[test]
+    fn write_then_read_persisted_state_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("rampp.state");
+        let mut original = crate::state::PersistedState::default_stopped();
+        original.phpmyadmin_blowfish_secret = Some("abc123".to_string());
+        original.phpmyadmin_enabled = true;
+        write_persisted_state(&path, &original).unwrap();
+        let back = read_persisted_state(&path);
+        assert_eq!(back.phpmyadmin_blowfish_secret.as_deref(), Some("abc123"));
+        assert!(back.phpmyadmin_enabled);
     }
 }
