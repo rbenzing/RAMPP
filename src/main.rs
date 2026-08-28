@@ -250,7 +250,7 @@ fn main() {
                 // Watcher threads call WaitForSingleObject so this returns as soon
                 // as the OS has terminated all process trees — typically < 1ms.
                 log::info!("shutdown: waiting for all processes to terminate");
-                executor.shutdown_and_join();
+                executor.shutdown_and_join(&state);
                 log::info!("shutdown: all processes stopped");
                 let _ = shutdown_done_tx.send(());
                 break;

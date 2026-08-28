@@ -359,7 +359,6 @@ fn php_env(cfg: &RampConfig) -> Vec<(String, String)> {
 
 /// What a service's error log says about why it exited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // wired up in task 12
 pub enum ExitDiagnosis {
     /// The service could not bind its port. `reserved` means Windows refused the
     /// bind outright (WSAEACCES), which usually means the port sits inside an
@@ -373,7 +372,6 @@ pub enum ExitDiagnosis {
 
 /// Classify a service exit from the tail of its error log. Pure — the caller is
 /// responsible for reading only the bytes this run produced.
-#[allow(dead_code)] // wired up in task 12
 pub fn diagnose_exit(svc: Service, log_tail: &str) -> ExitDiagnosis {
     let lower = log_tail.to_lowercase();
 

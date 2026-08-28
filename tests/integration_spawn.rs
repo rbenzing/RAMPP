@@ -314,3 +314,36 @@ fn try_wait_reflects_process_lifecycle() {
     );
     proc.kill();
 }
+
+#[test]
+fn watcher_reports_a_bind_failure_as_port_unavailable() {
+    // A log tail carrying Apache's bind signature must produce PortUnavailable,
+    // not ProcessExit, so allocation advances instead of burning a retry.
+    let tail = "(OS 10013)An attempt was made to access a socket in a way forbidden \
+                by its access permissions.  : AH00072: make_sock: could not bind to \
+                address 127.0.0.1:8080";
+    assert!(matches!(
+        rampp::process::diagnose_exit(rampp::state::Service::Apache, tail),
+        rampp::process::ExitDiagnosis::PortBindFailure { reserved: true }
+    ));
+}
+
+#[test]
+fn read_log_tail_from_offset_ignores_earlier_content() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("apache_error.log");
+    std::fs::write(&path, b"stale bind failure from a previous run\n").unwrap();
+    let offset = std::fs::metadata(&path).unwrap().len();
+    std::fs::write(
+        &path,
+        b"stale bind failure from a previous run\nfresh line\n",
+    )
+    .unwrap();
+
+    let tail = rampp::executor::read_log_tail_from(&path, offset, 20).unwrap();
+    assert!(tail.contains("fresh line"));
+    assert!(
+        !tail.contains("stale"),
+        "a bind failure logged by a previous run must never be attributed to this one"
+    );
+}

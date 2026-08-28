@@ -15,7 +15,7 @@ pub mod reducer;
 pub mod state;
 
 // Internal modules only needed to satisfy transitive dependencies of the above.
-mod executor;
+pub mod executor;
 mod mysql_conf;
 mod php_conf;
 pub mod phpmyadmin_conf;

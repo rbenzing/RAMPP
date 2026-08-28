@@ -123,11 +123,6 @@ pub fn needs_initialization(cfg: &RampConfig) -> bool {
 ///
 /// Best-effort only. The caller MUST still close the Job Object afterwards — that
 /// remains the termination guarantee and the no-orphan invariant.
-///
-/// Not yet called from `Executor::do_kill` — that wiring is a later task, so this
-/// function is presently unused by `src/main.rs`'s standalone binary crate (which
-/// does not inherit `src/lib.rs`'s crate-wide `#![allow(dead_code)]`).
-#[allow(dead_code)]
 pub fn graceful_shutdown(
     cfg: &RampConfig,
     port: u16,

@@ -44,7 +44,7 @@ impl Executor {
         for effect in effects {
             match effect {
                 SideEffect::SpawnService { service, port } => self.do_spawn(service, port, state),
-                SideEffect::KillService(svc) => self.do_kill(svc),
+                SideEffect::KillService(svc) => self.do_kill(svc, state),
                 SideEffect::StartReadinessCheck(svc) => self.do_readiness_check(svc, state),
                 SideEffect::StopHealthCheck(svc) => self.do_stop_health(svc),
                 SideEffect::ScheduleRetry { service, delay } => {
@@ -115,19 +115,30 @@ impl Executor {
         }
 
         // Kill any existing handles for this service
-        self.do_kill(svc);
+        self.do_kill(svc, state);
 
         let (kill_tx, kill_rx) = crossbeam_channel::bounded::<()>(1);
+
+        // Capture the log's length before spawning — only bytes past this offset
+        // were written by this run, so a bind failure logged by a previous run
+        // (these are long-lived error logs) can never be misattributed to it.
+        let error_log = match svc {
+            Service::Apache => self
+                .config
+                .install_dir
+                .join("logs")
+                .join("apache_error.log"),
+            Service::Mysql => self.config.install_dir.join("logs").join("mysql_error.log"),
+            Service::Php => self.config.install_dir.join("logs").join("php_errors.log"),
+        };
+        let log_offset = log_len(&error_log);
 
         match spawn_service(svc, &self.config, port, self.tx.clone()) {
             Ok(proc) => {
                 let tx = self.tx.clone();
-                let error_log = if svc == Service::Mysql {
-                    Some(self.config.install_dir.join("logs").join("mysql_error.log"))
-                } else {
-                    None
-                };
-                let join = std::thread::spawn(move || watcher(proc, tx, kill_rx, error_log));
+                let join = std::thread::spawn(move || {
+                    watcher(proc, tx, kill_rx, error_log, port, log_offset)
+                });
                 self.handles.insert(
                     svc,
                     ServiceHandles {
@@ -214,8 +225,25 @@ impl Executor {
         }
     }
 
-    fn do_kill(&mut self, svc: Service) {
+    fn do_kill(&mut self, svc: Service, state: &AppState) {
         self.do_stop_health(svc);
+
+        // Ask MySQL to close InnoDB cleanly first. Best-effort only: the Job
+        // Object close below is unconditional and remains the termination
+        // guarantee — a failed or timed-out attempt here must never skip it.
+        if svc == Service::Mysql {
+            if let Some(port) = state.ports.assigned(Service::Mysql) {
+                match crate::mysql_conf::graceful_shutdown(
+                    &self.config,
+                    port,
+                    crate::state::MYSQL_SHUTDOWN_GRACE,
+                ) {
+                    Ok(()) => self.log.push("MySQL: clean shutdown complete".to_string()),
+                    Err(e) => log::debug!("MySQL graceful shutdown skipped: {e}"),
+                }
+            }
+        }
+
         if let Some(h) = self.handles.remove(&svc) {
             // Signal watcher to kill its process tree.
             let _ = h.kill_tx.send(());
@@ -359,35 +387,19 @@ impl Executor {
         secret
     }
 
-    /// Graceful shutdown: signal all watcher threads to kill their processes, stop all
-    /// health checkers, then join every watcher thread — blocking until each managed
-    /// process is confirmed dead. Called by the event loop after processing ShutdownAll.
+    /// Graceful shutdown: for every service with a live handle, attempt MySQL's
+    /// clean stop, stop its health checker, then kill and join its watcher thread —
+    /// blocking until each managed process is confirmed dead. Called by the event
+    /// loop after processing ShutdownAll.
     ///
     /// This guarantees no orphaned processes remain when RAMPP exits. The caller should
     /// enforce an external timeout (SHUTDOWN_GRACE_PERIOD) as a safety net.
-    pub fn shutdown_and_join(&mut self) {
-        // Signal every health checker to stop first so it doesn't send events
-        // to a dying event loop.
-        for h in self.handles.values_mut() {
-            if let Some(stop) = h.health_stop_tx.take() {
-                let _ = stop.send(());
-            }
-        }
-
-        // Signal every watcher to kill its process, then collect all join handles.
-        let handles: Vec<_> = self.handles.drain().collect();
-        for (_svc, h) in handles {
-            let _ = h.kill_tx.send(());
-            if let Some(join) = h.watcher_join {
-                // Blocks until proc.kill() + WaitForSingleObject complete.
-                // In practice this is sub-millisecond — the Job Object close is instant.
-                let _ = join.join();
-            }
-            // Health checker threads were already stopped above, but join any that
-            // weren't stopped yet (e.g. if shutdown_and_join is called directly).
-            if let Some(join) = h.health_join {
-                let _ = join.join();
-            }
+    pub fn shutdown_and_join(&mut self, state: &AppState) {
+        let services: Vec<Service> = self.handles.keys().copied().collect();
+        for svc in services {
+            // Reuses do_kill so app-exit gets the same best-effort MySQL graceful
+            // shutdown as a normal stop, and the same unconditional Job Object close.
+            self.do_kill(svc, state);
         }
     }
 
@@ -405,13 +417,19 @@ impl Executor {
 /// Uses crossbeam select! so kill signals are acted on immediately rather than
 /// waiting for the next 100ms poll interval.
 ///
-/// `error_log`: if provided, the tail of this file is emitted as a LogEvent on non-zero exit
-/// so crash reasons are visible without leaving the RAMPP UI.
+/// `error_log`: the service's error log path. Only bytes past `log_offset` (the
+/// log's length captured immediately before spawn) are read, so a bind failure
+/// logged by a previous run is never misattributed to this one.
+///
+/// `port`: the port this attempt was assigned — needed to report `PortUnavailable`,
+/// which (unlike `ProcessExit`) carries no port of its own.
 fn watcher(
     proc: ServiceProcess,
     tx: Sender<Event>,
     kill_rx: crossbeam_channel::Receiver<()>,
-    error_log: Option<std::path::PathBuf>,
+    error_log: std::path::PathBuf,
+    port: u16,
+    log_offset: u64,
 ) {
     let svc = proc.service;
     let poll_interval = std::time::Duration::from_millis(100);
@@ -429,14 +447,31 @@ fn watcher(
                 // Non-blocking poll: has the process exited on its own?
                 if let Some(code) = proc.try_wait() {
                     drop(proc);
+                    let tail = read_log_tail_from(&error_log, log_offset, 20);
                     if code != 0 {
-                        if let Some(ref log_path) = error_log {
-                            if let Some(tail) = read_log_tail(log_path, 20) {
-                                let _ = tx.send(Event::DiagnosticLog(format!(
-                                    "{svc}: error log tail:\n{tail}"
-                                )));
-                            }
+                        if let Some(ref t) = tail {
+                            let _ = tx.send(Event::DiagnosticLog(format!(
+                                "{svc}: error log tail:\n{t}"
+                            )));
                         }
+                    }
+                    // A failed bind is not a crash — report it so allocation advances to the
+                    // next port rather than burning one of four retries.
+                    let diagnosis = tail
+                        .as_deref()
+                        .map(|t| crate::process::diagnose_exit(svc, t))
+                        .unwrap_or(crate::process::ExitDiagnosis::Unknown);
+                    if let crate::process::ExitDiagnosis::PortBindFailure { reserved } = diagnosis
+                    {
+                        if reserved {
+                            let _ = tx.send(Event::DiagnosticLog(format!(
+                                "{svc}: Windows refused port {port} — it is probably inside a \
+                                 reserved range. Check: netsh interface ipv4 show \
+                                 excludedportrange protocol=tcp"
+                            )));
+                        }
+                        let _ = tx.send(Event::PortUnavailable { service: svc, port });
+                        return;
                     }
                     let _ = tx.send(Event::ProcessExit {
                         service: svc,
@@ -449,15 +484,27 @@ fn watcher(
     }
 }
 
-/// Read the last `max_lines` lines of a text file. Returns None if the file cannot be read.
-fn read_log_tail(path: &std::path::Path, max_lines: usize) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    if content.is_empty() {
+/// Read up to `max_lines` from a log file, starting at `offset` bytes.
+///
+/// The offset is recorded immediately before spawn, so a bind failure written by
+/// a previous run can never be misattributed to the current one.
+pub fn read_log_tail_from(path: &std::path::Path, offset: u64, max_lines: usize) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = String::new();
+    f.read_to_string(&mut buf).ok()?;
+    if buf.trim().is_empty() {
         return None;
     }
-    let lines: Vec<&str> = content.lines().collect();
+    let lines: Vec<&str> = buf.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     Some(lines[start..].join("\n"))
+}
+
+/// Size of a log file right now, or 0 if it does not exist yet.
+fn log_len(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
 #[cfg(test)]
