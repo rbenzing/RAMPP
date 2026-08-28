@@ -387,7 +387,16 @@ port = 9000
         atomic_write(&path, b"world").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"world");
         // No .tmp file left behind
-        assert!(!path.with_extension("tmp").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -477,7 +486,16 @@ port = 9000
         let path = tmp.path().join("out.toml");
         atomic_write(&path, b"data").unwrap();
         assert!(path.exists());
-        assert!(!path.with_extension("tmp").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     #[test]
