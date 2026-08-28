@@ -20,6 +20,12 @@ struct ServiceHandles {
     /// Join handle for the health checker thread — joined during shutdown to
     /// bound its lifetime and prevent sends to a dead event channel.
     health_join: Option<std::thread::JoinHandle<()>>,
+    /// Set true by `start_health_check`, which the event loop calls exactly
+    /// when this spawn's service first transitions to `Running`. A handle
+    /// exists from spawn time — before anything has bound a port — so this
+    /// is what actually distinguishes "was listening and serving" from "we
+    /// merely tried to start it and it may have failed to bind."
+    became_ready: bool,
 }
 
 /// Executor translates SideEffects into real I/O. Owns all live process/thread handles.
@@ -74,8 +80,14 @@ impl Executor {
                 watcher_join: None,
                 health_stop_tx: None,
                 health_join: None,
+                became_ready: false,
             }
         });
+        // The event loop calls this exactly when `svc` first transitions to
+        // Running — the one reliable signal that this spawn actually bound
+        // its port and answered a real protocol handshake, not just that a
+        // process object exists.
+        entry.became_ready = true;
         entry.health_stop_tx = Some(stop_tx);
         let tx = self.tx.clone();
         let join = std::thread::spawn(move || run_health_checker(svc, port, tx, stop_rx));
@@ -146,6 +158,7 @@ impl Executor {
                         watcher_join: Some(join),
                         health_stop_tx: None,
                         health_join: None,
+                        became_ready: false,
                     },
                 );
             }
@@ -226,14 +239,31 @@ impl Executor {
     }
 
     /// Whether a best-effort MySQL graceful shutdown should be attempted before
-    /// the Job Object close. Gated on an actual live handle — not merely on a
-    /// port being recorded in the ledger, since `do_kill` is also reached with
-    /// no MySQL process at all (a cold first start, a crash auto-retry, and a
-    /// bind-failure retry all call it to clear any stale handle before
-    /// spawning, and in every one of those cases there is nothing listening to
-    /// shut down). Pure and side-effect-free so it can be unit-tested directly.
+    /// the Job Object close.
+    ///
+    /// Gated on the current handle having actually reached readiness
+    /// (`became_ready`), not merely on a handle existing. A handle is present
+    /// from the moment a process is spawned — before anything has bound a
+    /// port — so gating on presence alone is not enough: a MySQL spawn that
+    /// failed to bind (the reserved-port / bind-failure retry path this
+    /// feature targets) has a handle right up until this same call removes it
+    /// below, with nothing ever listening on the other end. `became_ready` is
+    /// only set once `start_health_check` runs, which the event loop calls
+    /// exactly when the service first reaches `Running` — i.e. only after a
+    /// real MySQL protocol handshake succeeded. This is also why `Running`
+    /// itself can't be used as the gate: on the normal stop/restart path the
+    /// reducer sets the state to `Stopping` before `KillService` runs, so by
+    /// the time `do_kill` executes the state has already moved past
+    /// `Running`, while `became_ready` — set once and never cleared — still
+    /// correctly remembers that this instance was really up.
+    ///
+    /// Cold first start / crash auto-retry / bind-failure retry: no handle,
+    /// or a handle that never became ready → false. Normal stop, restart from
+    /// Running, and ShutdownAll from Running: became ready → true.
+    ///
+    /// Pure and side-effect-free so it can be unit-tested directly.
     fn should_attempt_graceful_stop(&self, svc: Service) -> bool {
-        svc == Service::Mysql && self.handles.contains_key(&svc)
+        svc == Service::Mysql && self.handles.get(&svc).is_some_and(|h| h.became_ready)
     }
 
     fn do_kill(&mut self, svc: Service, state: &AppState) {
@@ -607,13 +637,18 @@ mod tests {
 
     /// A minimal fake handle for tests that only need `handles` to be
     /// non-empty for a service — no real process or thread is involved.
-    fn fake_handle() -> ServiceHandles {
+    /// `ready` sets `became_ready`, i.e. whether this fake spawn is meant to
+    /// simulate one that reached `Running` (a real protocol handshake
+    /// succeeded) versus one that is merely spawned (e.g. still starting, or
+    /// failed to bind and never got there).
+    fn fake_handle(ready: bool) -> ServiceHandles {
         let (kill_tx, _kill_rx) = crossbeam_channel::bounded::<()>(1);
         ServiceHandles {
             kill_tx,
             watcher_join: None,
             health_stop_tx: None,
             health_join: None,
+            became_ready: ready,
         }
     }
 
@@ -641,14 +676,36 @@ mod tests {
         );
     }
 
+    /// Regression pin for the second review round: a handle existing is not
+    /// enough. A MySQL spawn that failed to bind (the reserved-port /
+    /// bind-failure retry this feature exists to fix) has a handle right up
+    /// until `do_kill` removes it, but that handle never reached readiness —
+    /// nothing was ever listening on the other end, so a graceful shutdown
+    /// attempt there would be a doomed `mysqladmin` call every single retry.
     #[test]
-    fn graceful_stop_is_attempted_with_a_live_mysql_handle_present() {
+    fn graceful_stop_is_skipped_when_the_handle_never_became_ready() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_cfg(tmp.path());
         let (tx, _rx) = crossbeam_channel::unbounded();
         let log = SharedLog::new();
         let mut executor = Executor::new(cfg, tx, log);
-        executor.handles.insert(Service::Mysql, fake_handle());
+        executor.handles.insert(Service::Mysql, fake_handle(false));
+
+        assert!(
+            !executor.should_attempt_graceful_stop(Service::Mysql),
+            "a handle that never reached readiness (e.g. a bind-failure retry) \
+             must not trigger a graceful shutdown attempt"
+        );
+    }
+
+    #[test]
+    fn graceful_stop_is_attempted_once_the_handle_became_ready() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let mut executor = Executor::new(cfg, tx, log);
+        executor.handles.insert(Service::Mysql, fake_handle(true));
 
         assert!(executor.should_attempt_graceful_stop(Service::Mysql));
     }
@@ -660,10 +717,11 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let log = SharedLog::new();
         let mut executor = Executor::new(cfg, tx, log);
-        // Give both non-MySQL services a live handle too — the predicate must
-        // still say no, since only MySQL gets a graceful mysqladmin shutdown.
-        executor.handles.insert(Service::Apache, fake_handle());
-        executor.handles.insert(Service::Php, fake_handle());
+        // Give both non-MySQL services a *ready* handle too — the predicate
+        // must still say no, since only MySQL gets a graceful mysqladmin
+        // shutdown regardless of readiness.
+        executor.handles.insert(Service::Apache, fake_handle(true));
+        executor.handles.insert(Service::Php, fake_handle(true));
 
         assert!(!executor.should_attempt_graceful_stop(Service::Apache));
         assert!(!executor.should_attempt_graceful_stop(Service::Php));
