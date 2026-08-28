@@ -9,7 +9,7 @@ use rampp::events::{Event, SideEffect};
 use rampp::reducer::reducer;
 use rampp::state::{
     ApacheConfig, AppState, DesiredServiceState, MysqlConfig, PhpConfig, PhpMyAdminConfig,
-    RampConfig, Service, ServiceState, MAX_RETRIES,
+    RampConfig, Service, ServiceState, MAX_RETRIES, PORT_SCAN_RANGE,
 };
 use std::path::PathBuf;
 
@@ -68,6 +68,16 @@ fn arb_desired() -> impl Strategy<Value = DesiredServiceState> {
     ]
 }
 
+/// Ports plausible enough to collide with a live assignment, rather than almost
+/// certainly missing and only ever exercising `PortUnavailable`'s stale-report
+/// branch. Spans each service's home port through its scan range under
+/// `make_base_state()`'s default (disjoint) config — apache 8080..=8100, mysql
+/// 3306..=3326, php 9000..=9020 — so a generated port has a real chance of
+/// matching whichever service's live in-flight assignment is current.
+fn arb_port() -> impl Strategy<Value = u16> {
+    prop_oneof![8080u16..=8100, 3306u16..=3326, 9000u16..=9020]
+}
+
 fn arb_event() -> impl Strategy<Value = Event> {
     prop_oneof![
         arb_service().prop_map(Event::StartService),
@@ -94,6 +104,8 @@ fn arb_event() -> impl Strategy<Value = Event> {
             reason,
         }),
         arb_service().prop_map(Event::AutoRetry),
+        (arb_service(), arb_port())
+            .prop_map(|(svc, port)| Event::PortUnavailable { service: svc, port }),
         Just(Event::Tick),
         Just(Event::ShutdownAll),
     ]
@@ -267,5 +279,137 @@ proptest! {
             state = new_state;
             check_invariants(&state);
         }
+    }
+
+    /// The invariant the whole reducer-owned port ledger exists to guarantee: no
+    /// two services ever hold the same assigned port.
+    ///
+    /// Configured with apache and mysql sharing the exact same configured home
+    /// port (8080) — not just nearby ports — rather than `make_base_state()`'s
+    /// default disjoint ports. This matters: an earlier draft only spaced the
+    /// three home ports a few ports apart within overlapping 20-port scan
+    /// ranges (8080/8085/8090). That was still vacuous in practice, because with
+    /// distinct home ports every service's *first* allocation attempt lands on
+    /// its own home port (offset 0) without ever consulting another service's
+    /// candidates — a collision could only emerge after several consecutive,
+    /// exact-port-matching `PortUnavailable` events walked one service's scan
+    /// deep enough to reach another's territory, which is astronomically
+    /// unlikely for `arb_event()`'s uniformly-random port field to produce
+    /// several times in a row for the same service. Confirmed empirically: with
+    /// `allocate_port`'s `taken_by_other` guard deliberately disabled, that
+    /// draft still passed every run. Sharing a home port instead makes the
+    /// collision reachable on the very first `StartService` for each of the two
+    /// services — no drift required — so the property actually exercises the
+    /// guard. Re-confirmed the same way: disabling `taken_by_other` now reliably
+    /// fails this property (see the task report for the exact run).
+    #[test]
+    fn no_two_services_ever_share_an_assigned_port(
+        events in prop::collection::vec(arb_event(), 0..60),
+    ) {
+        let mut state = make_base_state();
+        state.config.apache.port = 8080;
+        state.config.mysql.port = 8080; // deliberately identical to apache's
+        state.config.php.port = 8081;
+        for event in events {
+            let (next, _) = reducer(state, event);
+            state = next;
+            let assigned: Vec<u16> = [Service::Apache, Service::Mysql, Service::Php]
+                .into_iter()
+                .filter_map(|s| state.ports.assigned(s))
+                .collect();
+            let mut unique = assigned.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            prop_assert_eq!(
+                assigned.len(),
+                unique.len(),
+                "two services hold the same port: {:?}",
+                assigned
+            );
+        }
+    }
+
+    /// A reconcile that changed nothing must not restart anything — this is what
+    /// stops the config-restart chain from looping. Runs a random warm-up event
+    /// sequence first so the property is checked from states where services have
+    /// actually reached Running or Starting (not just the fresh Stopped state
+    /// `ConfigsReconciled`'s restart branch requires to have anything to do).
+    #[test]
+    fn an_empty_reconcile_never_restarts_anything(
+        events in prop::collection::vec(arb_event(), 0..40),
+    ) {
+        let mut state = make_base_state();
+        for event in events {
+            let (next, _) = reducer(state, event);
+            state = next;
+        }
+        let (_, effects) = reducer(
+            state,
+            Event::ConfigsReconciled {
+                changed: vec![],
+                spawning: None,
+            },
+        );
+        prop_assert!(
+            !effects.iter().any(|e| matches!(e, SideEffect::KillService(_))),
+            "an idempotent reconcile must terminate the restart chain"
+        );
+    }
+
+    /// Allocation always terminates: a single start attempt cannot issue more
+    /// spawns than the scan range allows. Forces the worst case — every single
+    /// candidate port in the scan range reported unavailable, back to back — by
+    /// always feeding `PortUnavailable` the service's own currently-assigned
+    /// (in-flight) port, so the property actually reaches full scan-range
+    /// exhaustion rather than stopping after a handful of iterations.
+    #[test]
+    fn a_start_attempt_never_exceeds_the_scan_range(svc in arb_service()) {
+        let state = make_base_state();
+        let (mut state, first_effects) = reducer(state, Event::StartService(svc));
+        prop_assert!(
+            first_effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::SpawnService { .. })),
+            "StartService on a clean, disjoint-port config must spawn immediately"
+        );
+        let mut spawns = 1usize;
+        for _ in 0..(PORT_SCAN_RANGE as usize + 5) {
+            let Some(port) = state.ports.assigned(svc) else {
+                break;
+            };
+            let (next, effects) = reducer(
+                state,
+                Event::PortUnavailable {
+                    service: svc,
+                    port,
+                },
+            );
+            state = next;
+            if effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::SpawnService { .. }))
+            {
+                spawns += 1;
+            }
+        }
+        prop_assert!(
+            spawns <= PORT_SCAN_RANGE as usize + 1,
+            "allocation issued {spawns} spawns, above the {} bound",
+            PORT_SCAN_RANGE as usize + 1
+        );
+        // Every candidate in the scan range was reported unavailable, so the loop
+        // must have run all the way to exhaustion (Error), not stopped early —
+        // proving the assert above actually rides the bound rather than sitting
+        // well under it by coincidence.
+        prop_assert_eq!(
+            state.service(svc).state,
+            ServiceState::Error,
+            "worst-case exhaustion must reach Error, proving the loop ran to the bound"
+        );
+        prop_assert_eq!(
+            spawns,
+            PORT_SCAN_RANGE as usize + 1,
+            "worst-case exhaustion should spawn exactly once per candidate port"
+        );
     }
 }
