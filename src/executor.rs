@@ -272,6 +272,7 @@ impl Executor {
         // Ask MySQL to close InnoDB cleanly first. Best-effort only: the Job
         // Object close below is unconditional and remains the termination
         // guarantee — a failed or timed-out attempt here must never skip it.
+        let mut graceful_shutdown_accepted = false;
         if self.should_attempt_graceful_stop(svc) {
             if let Some(port) = state.ports.assigned(Service::Mysql) {
                 match crate::mysql_conf::graceful_shutdown(
@@ -279,19 +280,48 @@ impl Executor {
                     port,
                     crate::state::MYSQL_SHUTDOWN_GRACE,
                 ) {
-                    Ok(()) => self.log.push("MySQL: clean shutdown complete".to_string()),
+                    Ok(()) => {
+                        self.log.push("MySQL: clean shutdown complete".to_string());
+                        graceful_shutdown_accepted = true;
+                    }
                     Err(e) => log::debug!("MySQL graceful shutdown skipped: {e}"),
                 }
             }
         }
 
         if let Some(h) = self.handles.remove(&svc) {
-            // Signal watcher to kill its process tree.
+            // `graceful_shutdown`'s Ok(()) only means the `mysqladmin` CLIENT
+            // exited after the server accepted the shutdown command — NOT that
+            // mysqld itself has finished its own shutdown sequence (flushing
+            // InnoDB, closing the buffer pool). Measured against a real server
+            // this can lag by ~1-1.5s. Give the watcher a chance to observe
+            // mysqld exiting on its own before forcing the Job Object closed:
+            // the watcher's existing try_wait loop notices the natural exit,
+            // emits ProcessExit, and returns, so polling its JoinHandle is
+            // exactly the signal that mysqld is actually done. If it does not
+            // finish within the grace period, fall through to the unconditional
+            // force-kill below exactly as before — a graceful attempt that
+            // times out must never skip the termination guarantee.
+            if graceful_shutdown_accepted {
+                if let Some(join) = &h.watcher_join {
+                    let deadline = std::time::Instant::now() + crate::state::MYSQL_SHUTDOWN_GRACE;
+                    while !join.is_finished() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
+
+            // Signal watcher to kill its process tree. A no-op if the watcher
+            // already returned above (natural exit): the channel's receiver is
+            // gone, this send fails harmlessly, and the Job Object it would
+            // have closed was already closed by the watcher's own natural-exit
+            // path.
             let _ = h.kill_tx.send(());
             // Join the watcher so we know the kill completed before we return.
             // This prevents a stale ProcessExit event arriving after a restart
             // has already moved the service back to Starting, which would cause
-            // the reducer to incorrectly transition Starting → Crashed.
+            // the reducer to incorrectly transition Starting → Crashed. Instant
+            // if the watcher already finished above.
             if let Some(join) = h.watcher_join {
                 let _ = join.join();
             }

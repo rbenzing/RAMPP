@@ -17,7 +17,10 @@
 //!
 //! Ports are deliberately far from RAMPP's defaults (8080/3306/9000) so a
 //! failure here is unambiguous and this suite cannot collide with a real
-//! RAMPP instance on the same machine.
+//! RAMPP instance on the same machine. Every test also uses a port disjoint
+//! from every other test's (see the constants below), so the whole suite is
+//! safe to run exactly as recommended above -- cargo's default multi-threaded
+//! runner, no `--test-threads=1` needed.
 
 use rampp::process::{spawn_service, ServiceProcess};
 use rampp::provision::{desired_configs, reconcile};
@@ -30,6 +33,13 @@ use std::time::{Duration, Instant};
 const APACHE_PORT: u16 = 18080;
 const MYSQL_PORT: u16 = 13306;
 const PHP_PORT: u16 = 19000;
+/// Used only by `fastcgi_probe_answers_real_php_cgi`, distinct from `PHP_PORT`
+/// (used by `php_restart_survives_without_a_sixty_second_blackout`): the
+/// suite's own usage comment above recommends running with cargo's default
+/// multi-threaded runner, and `spawn()` does not pre-check port availability
+/// the way production's `do_spawn` does, so two tests binding the same PHP
+/// port could otherwise race non-deterministically.
+const PHP_PORT_PROBE: u16 = 19001;
 
 fn stack_dir() -> PathBuf {
     PathBuf::from(
@@ -170,15 +180,19 @@ fn fastcgi_probe_answers_real_php_cgi() {
     let dir = stack_dir();
     let cfg = make_config(&dir);
     create_runtime_dirs(&cfg);
+    // Apache/MySQL ports here don't matter to this test (only PHP is spawned)
+    // and this is deliberately the shared PHP_PORT-based config content, same
+    // as the other tests -- see PHP_PORT_PROBE's doc comment for why the
+    // *spawn* below uses a different port than this render does.
     let ports = ports_for(APACHE_PORT, MYSQL_PORT, PHP_PORT);
     write_configs(&cfg, &ports);
 
-    let mut php = spawn(Service::Php, &cfg, PHP_PORT);
+    let mut php = spawn(Service::Php, &cfg, PHP_PORT_PROBE);
 
     let ready = wait_until(Duration::from_secs(5), || {
-        rampp::health::check_php_ready(PHP_PORT)
+        rampp::health::check_php_ready(PHP_PORT_PROBE)
     });
-    println!("check_php_ready({PHP_PORT}) became true after: {ready:?}");
+    println!("check_php_ready({PHP_PORT_PROBE}) became true after: {ready:?}");
     assert!(
         ready.is_some(),
         "real php-cgi.exe did not answer FCGI_GET_VALUES within 5s -- \
@@ -408,6 +422,142 @@ fn mysql_shutdown_is_clean_and_health_checks_leave_no_aborted_connections() {
     println!(
         "restart log after clean shutdown (first 2000 chars):\n{}",
         &restart_tail[..restart_tail.len().min(2000)]
+    );
+
+    mysql2.kill_now();
+}
+
+/// Used only by `do_kill_waits_for_mysqld_to_actually_exit_before_forcing_the_job_object`,
+/// with its own data directory and my.ini so it is fully isolated from
+/// `MYSQL_PORT`'s instance (used by
+/// `mysql_shutdown_is_clean_and_health_checks_leave_no_aborted_connections`)
+/// -- the two are safe to run concurrently under cargo's default runner.
+const MYSQL_PORT_DO_KILL: u16 = 13307;
+
+/// Finding 4 from code review: `executor.rs::do_kill` called `graceful_shutdown`
+/// (which only waits for the `mysqladmin` CLIENT to exit, ~0.1-0.2s) and then
+/// *immediately* signalled the watcher thread, whose `select!` reacts to a kill
+/// signal without waiting even one poll tick and unconditionally closes the Job
+/// Object -- racing ahead of mysqld's own shutdown, which this same suite
+/// measured taking ~1.2-1.5s longer. This test drives the REAL `Executor` (not
+/// a reimplementation) through its public `execute`/`start_health_check` API,
+/// exactly the way the reducer's side effects would, so it exercises the actual
+/// fixed `do_kill` code path against a real, Job-Object-managed mysqld.
+#[test]
+#[ignore]
+fn do_kill_waits_for_mysqld_to_actually_exit_before_forcing_the_job_object() {
+    use rampp::events::{Event, SideEffect};
+    use rampp::executor::Executor;
+    use rampp::logger::SharedLog;
+    use rampp::state::AppState;
+
+    let dir = stack_dir();
+    let mut cfg = make_config(&dir);
+    // Fully isolated MySQL instance: own port, own data dir, own my.ini.
+    cfg.mysql.port = MYSQL_PORT_DO_KILL;
+    cfg.mysql.data_dir = dir.join("mysql-do-kill-data");
+    cfg.mysql.ini = dir.join("mysql-do-kill").join("my.ini");
+    create_runtime_dirs(&cfg);
+
+    // Mirror the fix for a genuinely fresh install (see the Layer 3 report's
+    // "main.rs runs initialize_mysql before the reconciler ever writes my.ini"
+    // finding, discovered while building this test): mysqld's
+    // --defaults-file must point at a real file before --initialize-insecure
+    // runs, or mysqld prints "Failed to open required defaults file" /
+    // "Fatal error in defaults handling. Program aborted!" and exits 0 --
+    // silently succeeding without writing anything to the data directory.
+    rampp::config::atomic_write(
+        &cfg.mysql.ini,
+        rampp::mysql_conf::generate_my_ini_with_port(&cfg, MYSQL_PORT_DO_KILL).as_bytes(),
+    )
+    .expect("write isolated my.ini before initialize_mysql");
+
+    if rampp::mysql_conf::needs_initialization(&cfg) {
+        println!("initializing isolated MySQL data directory for the do_kill race test");
+        rampp::mysql_conf::initialize_mysql(&cfg).expect("mysqld --initialize-insecure failed");
+    }
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let mut executor = Executor::new(cfg.clone(), tx, SharedLog::new());
+
+    let mut state = AppState::new(cfg.clone());
+    state.ports.assign(Service::Mysql, MYSQL_PORT_DO_KILL);
+
+    // Real production spawn path: do_reconcile (writes the isolated my.ini) ->
+    // do_kill (no-op, nothing running yet) -> spawn_service -> watcher thread.
+    executor.execute(
+        vec![SideEffect::SpawnService {
+            service: Service::Mysql,
+            port: MYSQL_PORT_DO_KILL,
+        }],
+        &state,
+    );
+
+    let ready = wait_until(Duration::from_secs(30), || {
+        rampp::health::check_mysql_ready(MYSQL_PORT_DO_KILL)
+    });
+    assert!(ready.is_some(), "mysqld never became ready: {ready:?}");
+    println!("mysqld ready after {ready:?}");
+
+    // Exactly what the reducer does the moment it sees Running: tells the
+    // executor to start health checks, which is also what sets `became_ready`
+    // -- the gate `should_attempt_graceful_stop` requires before `do_kill`
+    // will even attempt a graceful shutdown at all.
+    executor.start_health_check(Service::Mysql, &state);
+    // Give the health checker a moment to actually run at least once, matching
+    // how long a real Running service would have had before a stop arrives.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let error_log = dir.join("logs").join("mysql_error.log");
+    let pre_kill_len = std::fs::metadata(&error_log).map(|m| m.len()).unwrap_or(0);
+
+    // The actual code path under test: reachable only through execute() +
+    // KillService, exactly as the reducer's SideEffect::KillService(Mysql)
+    // would drive it.
+    let kill_started = Instant::now();
+    executor.execute(vec![SideEffect::KillService(Service::Mysql)], &state);
+    let kill_elapsed = kill_started.elapsed();
+    println!("do_kill(Mysql) returned after {kill_elapsed:?}");
+
+    // Not asserted on -- just drained so the unbounded channel doesn't matter.
+    let drained: Vec<Event> = rx.try_iter().collect();
+    println!("events emitted during do_kill: {}", drained.len());
+
+    let log_after_kill = std::fs::read_to_string(&error_log).unwrap_or_default();
+    let new_bytes = &log_after_kill[pre_kill_len.min(log_after_kill.len() as u64) as usize..];
+    println!("mysql_error.log written during do_kill:\n{new_bytes}");
+    assert!(
+        log_after_kill.to_lowercase().contains("shutdown complete"),
+        "do_kill must wait for mysqld's own exit before forcing the Job Object \
+         closed, or the shutdown sequence gets truncated; log tail:\n{}",
+        tail(&log_after_kill, 4000)
+    );
+    let shutdown_offset = log_after_kill.len();
+
+    // Restart (via spawn_service directly, same as the other MySQL test) and
+    // confirm no crash-recovery messages -- the actual end-to-end proof that
+    // do_kill's shutdown was genuinely clean, not just log-message-clean.
+    let mut mysql2 = spawn(Service::Mysql, &cfg, MYSQL_PORT_DO_KILL);
+    let ready2 = wait_until(Duration::from_secs(30), || {
+        rampp::health::check_mysql_ready(MYSQL_PORT_DO_KILL)
+    });
+    assert!(
+        ready2.is_some(),
+        "mysqld did not come back up cleanly after do_kill"
+    );
+
+    let full_log = std::fs::read_to_string(&error_log).unwrap_or_default();
+    let restart_tail = &full_log[shutdown_offset.min(full_log.len())..];
+    let lower = restart_tail.to_lowercase();
+    println!(
+        "restart log after do_kill (first 2000 chars):\n{}",
+        &restart_tail[..restart_tail.len().min(2000)]
+    );
+    assert!(
+        !lower.contains("crash recovery") && !lower.contains("recovering"),
+        "restart after do_kill must not trigger InnoDB crash recovery; \
+         restart log tail:\n{}",
+        tail(restart_tail, 4000)
     );
 
     mysql2.kill_now();

@@ -104,8 +104,12 @@ pub fn initialize_mysql(cfg: &RampConfig) -> Result<(), String> {
     // TCP to 127.0.0.1 (the security constraint is loopback-only), so this
     // bootstrap file grants `cfg.phpmyadmin.mysql_user`@'127.0.0.1' with
     // `cfg.phpmyadmin.mysql_password` — the credentials RAMPP actually uses —
-    // full privileges. `--init-file` is honored during `--initialize-insecure`
-    // itself (confirmed empirically), so this needs no separate bootstrap server.
+    // full privileges (but not the ability to grant privileges to *other*
+    // accounts: phpMyAdmin never needs `WITH GRANT OPTION`, and granting it
+    // unconditionally would silently hand DBA-with-grant-option to a scoped,
+    // non-root `phpmyadmin.mysql_user` a security-conscious user configured).
+    // `--init-file` is honored during `--initialize-insecure` itself (confirmed
+    // empirically), so this needs no separate bootstrap server.
     let bootstrap_sql = cfg.install_dir.join("mysql").join(".rampp-bootstrap.sql");
     let user = sql_single_quoted(&cfg.phpmyadmin.mysql_user);
     let password = sql_single_quoted(&cfg.phpmyadmin.mysql_password);
@@ -114,7 +118,7 @@ pub fn initialize_mysql(cfg: &RampConfig) -> Result<(), String> {
         format!(
             "CREATE USER IF NOT EXISTS '{user}'@'127.0.0.1' IDENTIFIED BY '{password}';\n\
              ALTER USER '{user}'@'127.0.0.1' IDENTIFIED BY '{password}';\n\
-             GRANT ALL PRIVILEGES ON *.* TO '{user}'@'127.0.0.1' WITH GRANT OPTION;\n\
+             GRANT ALL PRIVILEGES ON *.* TO '{user}'@'127.0.0.1';\n\
              FLUSH PRIVILEGES;\n"
         ),
     )
@@ -149,7 +153,20 @@ pub fn initialize_mysql(cfg: &RampConfig) -> Result<(), String> {
     // so the file on disk was only ever needed for this one invocation. It is
     // not a "managed file" the reconciler tracks, and it may contain a
     // plaintext password, so remove it regardless of whether init succeeded.
-    let _ = std::fs::remove_file(&bootstrap_sql);
+    // Not crash-safe by construction — a kill or panic between the write above
+    // and this delete leaves the file behind indefinitely (rampp.toml and
+    // config.inc.php already hold this same password permanently, so this is
+    // not a new class of exposure, just a longer-than-intended window for one
+    // more copy of it). Logging on failure is what makes a leftover file
+    // discoverable instead of silently forgotten.
+    if let Err(e) = std::fs::remove_file(&bootstrap_sql) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!(
+                "could not remove MySQL bootstrap init-file {} (contains a plaintext password): {e}",
+                bootstrap_sql.display()
+            );
+        }
+    }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     log::info!("MySQL init output:\n{stderr}");
