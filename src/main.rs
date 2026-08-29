@@ -55,6 +55,21 @@ fn main() {
     };
 
     // --- Startup provisioning (idempotent, safe to run every launch) ------
+    //
+    // Ordering matters here and is easy to get wrong again: MySQL initialization
+    // (step 5) needs `mysql/my.ini` to already exist, and `provision::reconcile`
+    // (step 4) is the ONLY thing that writes it. This block's steps must stay in
+    // this order — reconcile before initialize_mysql — or a genuinely fresh
+    // install silently fails: `mysqld --initialize-insecure` against a missing
+    // `--defaults-file` prints "Fatal error in defaults handling. Program
+    // aborted!" but still exits 0, so `initialize_mysql` reports success while
+    // the data directory stays completely empty. (This was a real regression:
+    // the original code called `ensure_my_ini` immediately before
+    // `initialize_mysql`, in the correct order. Task 10 of the
+    // config-integrity-and-connection-resilience plan deleted `ensure_my_ini`
+    // and moved all config writing into `provision::reconcile`, which — before
+    // this fix — ran much later, after MySQL init. See the Layer 3 task's
+    // report for the empirical reproduction.)
 
     // 1. Create required runtime directories
     if let Err(e) = create_runtime_dirs(&config) {
@@ -72,36 +87,18 @@ fn main() {
         log::warn!("cannot create logs dir: {e}");
     }
 
-    // 3. MySQL data directory initialization — deferred: if mysqld binary is missing
-    //    we record the error and let the UI surface it rather than crashing silently.
-    let mysql_init_error: Option<String> = if mysql_conf::needs_initialization(&config) {
-        log::info!("MySQL data directory is empty — running --initialize-insecure");
-        match mysql_conf::initialize_mysql(&config) {
-            Ok(()) => None,
-            Err(e) => {
-                log::error!("MySQL initialization failed: {e}");
-                Some(e)
-            }
-        }
-    } else {
-        None
-    };
-
     // --- Event loop setup -------------------------------------------------
 
+    // 3. Load persisted state and build app_state. None of this depends on any
+    // file `reconcile` writes (my.ini, httpd.conf, php.ini, phpmyadmin.conf,
+    // config.inc.php) — only on `rampp.state` and the `phpmyadmin/` directory's
+    // mere existence — so it is safe here, before reconcile.
     let persisted = config::read_persisted_state(&install_dir.join("rampp.state"));
 
     let mut app_state = AppState::new(config.clone());
     app_state.apache.desired = persisted.apache_desired;
     app_state.mysql.desired = persisted.mysql_desired;
     app_state.php.desired = persisted.php_desired;
-
-    // Surface deferred provisioning errors into the UI
-    if let Some(e) = mysql_init_error {
-        app_state.mysql.state = ServiceState::Error;
-        app_state.mysql.last_error = Some(format!("Init failed: {e}"));
-        app_state.mysql.desired = DesiredServiceState::Stopped;
-    }
 
     // phpMyAdmin cannot be enabled without an install to point at.
     let phpmyadmin_dir = config.install_dir.join("phpmyadmin");
@@ -119,8 +116,10 @@ fn main() {
         log::error!("cannot persist state: {e}");
     }
 
-    // Bring every managed config file in line. Nothing is running yet, so no
-    // restarts can be needed and the report is only logged.
+    // 4. Bring every managed config file in line — including writing `my.ini`
+    // for the very first time on a fresh install. Nothing is running yet, so
+    // no restarts can be needed and the report is only logged. This MUST run
+    // before step 5 (MySQL initialization) — see the ordering note above.
     let secret = persisted
         .phpmyadmin_blowfish_secret
         .clone()
@@ -137,6 +136,30 @@ fn main() {
     }
     for file in &report.user_owned {
         log::info!("{file} is user-owned — RAMPP will not modify it");
+    }
+
+    // 5. MySQL data directory initialization — deferred: if mysqld binary is
+    // missing we record the error and let the UI surface it rather than
+    // crashing silently. Runs after step 4 so `--defaults-file` always points
+    // at a `my.ini` that actually exists, even on the very first launch.
+    let mysql_init_error: Option<String> = if mysql_conf::needs_initialization(&config) {
+        log::info!("MySQL data directory is empty — running --initialize-insecure");
+        match mysql_conf::initialize_mysql(&config) {
+            Ok(()) => None,
+            Err(e) => {
+                log::error!("MySQL initialization failed: {e}");
+                Some(e)
+            }
+        }
+    } else {
+        None
+    };
+
+    // 6. Surface deferred provisioning errors into the UI
+    if let Some(e) = mysql_init_error {
+        app_state.mysql.state = ServiceState::Error;
+        app_state.mysql.last_error = Some(format!("Init failed: {e}"));
+        app_state.mysql.desired = DesiredServiceState::Stopped;
     }
 
     let shared_state = Arc::new(Mutex::new(app_state.clone()));
