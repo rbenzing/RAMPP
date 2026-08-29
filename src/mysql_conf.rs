@@ -1,5 +1,13 @@
 use crate::state::RampConfig;
 
+/// Escape a string for embedding inside a MySQL single-quoted string literal.
+/// Only `\` and `'` are special under the default (non-ANSI_QUOTES,
+/// non-NO_BACKSLASH_ESCAPES) `sql_mode` this crate generates — see
+/// `generate_my_ini_with_port`'s `sql_mode = ""`. Order matters: backslash first.
+fn sql_single_quoted(s: &str) -> String {
+    s.replace('\\', r"\\").replace('\'', r"\'")
+}
+
 /// Generate a minimal my.ini for MySQL 9.x compatible with RAMPP's layout,
 /// rendered from the reducer's port ledger — the executor's `provision`
 /// reconciler is the only caller in production; the port is always explicit.
@@ -83,15 +91,65 @@ pub fn initialize_mysql(cfg: &RampConfig) -> Result<(), String> {
         .and_then(|p| p.parent())
         .unwrap_or(&cfg.install_dir);
 
+    // Empirically required (Layer 3, tests/system_stack.rs): `--initialize-insecure`
+    // only ever creates `root@localhost` with an empty password — it ignores
+    // `cfg.phpmyadmin.mysql_password` entirely, and `localhost` is a distinct grant
+    // from any IP. Combined with `skip-name-resolve` in the my.ini above (which
+    // stops the reverse-DNS lookup that could otherwise resolve the connecting
+    // 127.0.0.1 back to the literal hostname "localhost"), NO TCP client — not
+    // `probe_mysql`'s handshake read, not `mysqladmin`, not phpMyAdmin — can even
+    // complete a connection: mysqld rejects it pre-authentication with
+    // `Host '127.0.0.1' is not allowed to connect to this MySQL server`, because
+    // no grant exists for that host at all. Every RAMPP-initiated connection is
+    // TCP to 127.0.0.1 (the security constraint is loopback-only), so this
+    // bootstrap file grants `cfg.phpmyadmin.mysql_user`@'127.0.0.1' with
+    // `cfg.phpmyadmin.mysql_password` — the credentials RAMPP actually uses —
+    // full privileges. `--init-file` is honored during `--initialize-insecure`
+    // itself (confirmed empirically), so this needs no separate bootstrap server.
+    let bootstrap_sql = cfg.install_dir.join("mysql").join(".rampp-bootstrap.sql");
+    let user = sql_single_quoted(&cfg.phpmyadmin.mysql_user);
+    let password = sql_single_quoted(&cfg.phpmyadmin.mysql_password);
+    std::fs::write(
+        &bootstrap_sql,
+        format!(
+            "CREATE USER IF NOT EXISTS '{user}'@'127.0.0.1' IDENTIFIED BY '{password}';\n\
+             ALTER USER '{user}'@'127.0.0.1' IDENTIFIED BY '{password}';\n\
+             GRANT ALL PRIVILEGES ON *.* TO '{user}'@'127.0.0.1' WITH GRANT OPTION;\n\
+             FLUSH PRIVILEGES;\n"
+        ),
+    )
+    .map_err(|e| format!("cannot write MySQL bootstrap init-file: {e}"))?;
+
+    // Empirically required (Layer 3, tests/system_stack.rs): with only SystemRoot
+    // set, real mysqld 9.7.0 aborts initialization with
+    // `mysqld: Can't get stat of '' (OS errno 2 - No such file or directory)`
+    // and refuses to initialize the data directory at all. mysqld resolves its
+    // temp path from the TEMP/TMP environment variables directly rather than
+    // falling back to a Windows API default, so env_clear() silently breaks
+    // --initialize-insecure on every machine, regardless of what the parent
+    // rampp.exe process's own environment contains. `process::spawn_service`
+    // already sets TEMP for the long-running mysqld; --initialize-insecure
+    // needs the same for its own one-shot run.
+    let temp = crate::paths::temp_dir();
     let output = std::process::Command::new(bin)
         .arg(format!("--defaults-file={}", ini.display()))
         .arg("--initialize-insecure")
+        .arg(format!("--init-file={}", bootstrap_sql.display()))
         .arg("--console")
         .current_dir(work_dir)
         .env_clear()
         .env("SystemRoot", crate::paths::system_root())
+        .env("TEMP", &temp)
+        .env("TMP", &temp)
         .output()
         .map_err(|e| format!("failed to run mysqld --initialize-insecure: {e}"))?;
+
+    // Best-effort cleanup: the grant is now durably persisted in the data
+    // directory's own system tables (InnoDB, innodb_flush_log_at_trx_commit=1),
+    // so the file on disk was only ever needed for this one invocation. It is
+    // not a "managed file" the reconciler tracks, and it may contain a
+    // plaintext password, so remove it regardless of whether init succeeded.
+    let _ = std::fs::remove_file(&bootstrap_sql);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     log::info!("MySQL init output:\n{stderr}");

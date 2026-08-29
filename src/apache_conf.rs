@@ -133,6 +133,18 @@ DocumentRoot "{doc_root}"
 # retry=0 is the important part: by default Apache marks a failed proxy worker
 # dead for 60 seconds, so every PHP-CGI restart caused a full minute of 503s on
 # every .php request even after PHP was healthy again.
+#
+# Worker key match — empirically verified at Layer 3 (tests/system_stack.rs,
+# `php_restart_survives_without_a_sixty_second_blackout`) against real Apache
+# 2.4.66 + PHP-CGI 8.5.6: this bare "fcgi://127.0.0.1:{php_port}" key (NO
+# trailing slash, NOT the "//./" suffix used below) is what mod_proxy_fcgi
+# resolves the SetHandler "proxy:fcgi://127.0.0.1:{php_port}//./" URL down to
+# for worker lookup — the path/suffix is per-request routing info, not part of
+# the worker's identity, which is scheme+host+port only. Killing php-cgi,
+# confirming a 503, then respawning it and requesting again immediately (no
+# fixed 60s sleep) came back 200 in ~0.5s: proof retry=0 is being applied to
+# the worker mod_proxy_fcgi actually dispatches through, not a same-looking
+# but distinct entry that SetHandler's URL would key to on its own.
 <Proxy "fcgi://127.0.0.1:{php_port}">
     ProxySet retry=0 timeout={proxy_timeout}
 </Proxy>

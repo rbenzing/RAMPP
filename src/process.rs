@@ -322,12 +322,35 @@ fn service_params(
         Service::Mysql => {
             // MySQL's port is baked into my.ini; the caller is responsible for
             // regenerating it when effective_port differs from the configured port.
+            //
+            // Deliberately NOT passing --console (empirically confirmed at Layer
+            // 3, tests/system_stack.rs, with an isolated repro that controls for
+            // a stale-lock confound -- see the Layer 3 report): on real mysqld
+            // 9.7.0, --console mode diverts its startup/shutdown diagnostics to
+            // the process's stdout/stderr instead of writing them to the
+            // `log_error` file configured in my.ini, confirmed by redirecting
+            // stdout/stderr to a file and observing `log_error`'s target file
+            // was never created while the redirected file received everything.
+            // spawn_service does not capture the child's stdout/stderr at all
+            // (no STARTF_USESTDHANDLES), so with --console every one of
+            // mysqld's log lines -- normal or fatal -- was previously discarded
+            // into the void. That silently defeated `diagnose_exit`'s bind-
+            // failure diagnosis for MySQL and made this task's own log-content
+            // assertions (crash-recovery / clean-shutdown checks) impossible to
+            // verify. (An earlier version of this comment additionally claimed
+            // --console caused mysqld to abort within milliseconds when spawned
+            // with no console handles at all; a follow-up isolated test -- same
+            // CreateProcessW shape, no stdout/stderr handles, --console kept --
+            // ran mysqld cleanly for 10s with no crash, so that specific claim
+            // was an artifact of a stale locked data directory left over from
+            // this task's own earlier manual testing, not a real --console
+            // effect. It is called out here so the correction is not lost.)
             let bin = cfg.mysql.bin.clone();
             let work_dir = cfg.install_dir.join("mysql");
-            let args = vec![
-                format!("--defaults-file={}", cfg.mysql.ini.to_string_lossy()),
-                "--console".into(),
-            ];
+            let args = vec![format!(
+                "--defaults-file={}",
+                cfg.mysql.ini.to_string_lossy()
+            )];
             (bin, args, work_dir)
         }
         Service::Php => {

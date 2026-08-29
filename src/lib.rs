@@ -16,8 +16,12 @@ pub mod state;
 
 // Internal modules only needed to satisfy transitive dependencies of the above.
 pub mod executor;
-mod mysql_conf;
-mod php_conf;
+// pub: Layer 3 system tests drive the MySQL lifecycle (initialize_mysql,
+// graceful_shutdown) directly against a real mysqld.
+pub mod mysql_conf;
+// pub: Layer 3 system tests call ensure_php_dirs to mirror main.rs's real
+// startup provisioning sequence (logs dir, logs/phpmyadmin) before spawning.
+pub mod php_conf;
 pub mod phpmyadmin_conf;
 mod tray;
 mod ui;
