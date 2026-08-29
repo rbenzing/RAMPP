@@ -41,6 +41,25 @@ const PHP_PORT: u16 = 19000;
 /// port could otherwise race non-deterministically.
 const PHP_PORT_PROBE: u16 = 19001;
 
+/// Serializes the two tests whose real mysqld processes both write to the
+/// SAME `logs/mysql_error.log` -- `mysql_shutdown_is_clean_and_...` (on
+/// `MYSQL_PORT`) and `do_kill_waits_for_mysqld_...` (on `MYSQL_PORT_DO_KILL`).
+/// The log path is derived from `install_dir` alone (see
+/// `mysql_conf::generate_my_ini_with_port` and `executor::do_spawn`'s
+/// `error_log` computation), never from `mysql.ini`/`data_dir` -- so giving
+/// each test its own port and data directory does NOT give them their own
+/// log file. Without this lock, under cargo's default parallel runner two
+/// real, concurrently-running mysqld instances interleave writes into one
+/// file, and each test's substring search (`"shutdown complete"`,
+/// `"crash recovery"`, `"Aborted connection"`) uses a byte-offset window
+/// computed independently per test -- a message from the OTHER instance can
+/// land inside a test's own window, producing a false pass or a spurious
+/// failure. Holding this for an entire test body (not just a critical
+/// section) is what makes the result deterministic rather than merely
+/// likely: the second test cannot begin writing to the shared log until the
+/// first has completely finished every assertion that reads it.
+static MYSQL_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn stack_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("RAMPP_L3_DIR")
@@ -308,6 +327,12 @@ fn php_restart_survives_without_a_sixty_second_blackout() {
 #[test]
 #[ignore]
 fn mysql_shutdown_is_clean_and_health_checks_leave_no_aborted_connections() {
+    // Serializes with do_kill_waits_for_mysqld_...: both tests' mysqld write
+    // to the SAME logs/mysql_error.log (see MYSQL_LOG_LOCK's doc comment
+    // above for why per-test port/data-dir isolation does not isolate the
+    // log file too). Held for the whole test body.
+    let _mysql_log_guard = MYSQL_LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = stack_dir();
     let cfg = make_config(&dir);
     create_runtime_dirs(&cfg);
@@ -450,6 +475,12 @@ fn do_kill_waits_for_mysqld_to_actually_exit_before_forcing_the_job_object() {
     use rampp::executor::Executor;
     use rampp::logger::SharedLog;
     use rampp::state::AppState;
+
+    // Serializes with mysql_shutdown_is_clean_and_...: both tests' mysqld
+    // write to the SAME logs/mysql_error.log (see MYSQL_LOG_LOCK's doc
+    // comment above for why per-test port/data-dir isolation does not
+    // isolate the log file too). Held for the whole test body.
+    let _mysql_log_guard = MYSQL_LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let dir = stack_dir();
     let mut cfg = make_config(&dir);
