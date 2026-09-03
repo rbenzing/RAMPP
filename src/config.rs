@@ -190,11 +190,25 @@ fn validate_and_build(doc: TomlRoot, install_dir: &Path) -> Result<RampConfig, S
 const RENAME_ATTEMPTS: usize = 3;
 const RENAME_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Monotonic counter used to make each `atomic_write` scratch file unique. Combined
+/// with the process id this keeps two concurrent writers (even on the same
+/// destination path) from sharing a temp file.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Atomic write: temp file → fsync → rename. Never corrupts the target.
 ///
 /// The temp path APPENDS `.tmp` rather than replacing the extension. Replacing it
 /// made `rampp.toml` and `rampp.state` both resolve to `rampp.tmp`, so the two
 /// writers shared a scratch file.
+///
+/// The scratch name is further made unique per call (process id + a monotonic
+/// counter) rather than fixed per destination. A fixed `{file_name}.tmp` name
+/// still let two concurrent writers to the *same* destination collide on one
+/// scratch file — the second writer's rename would find it already consumed by
+/// the first. Production never calls this concurrently for the same path (every
+/// `provision::reconcile` call runs on the single executor event-loop thread), but
+/// the primitive itself should not corrupt data if called concurrently, and the
+/// Layer 3 test suite does call it that way.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("path has no parent")?;
     std::fs::create_dir_all(dir)
@@ -205,7 +219,9 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
         .ok_or("path has no file name")?
         .to_string_lossy()
         .to_string();
-    let tmp = dir.join(format!("{file_name}.tmp"));
+    let pid = std::process::id();
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!("{file_name}.{pid}.{seq}.tmp"));
 
     let write_result = (|| -> Result<(), String> {
         let mut f =
@@ -672,6 +688,54 @@ port = 9000
         let path = tmp.path().join("rampp.toml");
         atomic_write(&path, b"x").unwrap();
         let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn atomic_write_concurrent_writers_same_destination_do_not_corrupt() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = TempDir::new().unwrap();
+        let path = Arc::new(tmp.path().join("shared.toml"));
+
+        const THREADS: usize = 8;
+        // Distinct, same-length payloads so a truncated/interleaved result is
+        // detectable but no payload is a prefix/suffix of another.
+        let payloads: Vec<Vec<u8>> = (0..THREADS)
+            .map(|i| format!("payload-{i}-{}", "x".repeat(64)).into_bytes())
+            .collect();
+
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|data| {
+                let path = Arc::clone(&path);
+                thread::spawn(move || atomic_write(&path, &data))
+            })
+            .collect();
+
+        for h in handles {
+            assert!(h.join().unwrap().is_ok(), "concurrent atomic_write failed");
+        }
+
+        let final_contents = std::fs::read(path.as_path()).unwrap();
+        assert!(
+            payloads.iter().any(|p| p == &final_contents),
+            "destination content did not match any single writer's payload intact: {:?}",
+            String::from_utf8_lossy(&final_contents)
+        );
+
+        let dir = path.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
