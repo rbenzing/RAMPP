@@ -4,9 +4,10 @@ on:
   push:
     tags:
       - "v*.*.*"
+    branches:
+      - main
   pull_request:
     branches:
-      - master
       - main
 
 env:
@@ -59,6 +60,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $cargoToml = Get-Content Cargo.toml -Raw
+
+          # Isolate the [package] section only, so a dependency's own
+          # `version = "..."` line (e.g. under [dependencies.windows]) can
+          # never be picked up instead of the package's own version.
+          if ($cargoToml -notmatch '(?ms)^\[package\]\r?\n(.*?)(?=\r?\n\[|\z)') {
+            Write-Error "Could not locate a [package] section in Cargo.toml"
+            exit 1
+          }
+          $packageSection = $Matches[1]
+
+          if ($packageSection -notmatch '(?m)^\s*version\s*=\s*"([^"]+)"') {
+            Write-Error "Could not find a version field inside the [package] section of Cargo.toml"
+            exit 1
+          }
+          $cargoVersion = $Matches[1]
+          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+
+          Write-Host "Tag:              ${{ github.ref_name }} (version: $tagVersion)"
+          Write-Host "Cargo.toml [package] version: $cargoVersion"
+
+          if ($cargoVersion -ne $tagVersion) {
+            Write-Error "Version mismatch: tag '${{ github.ref_name }}' does not match Cargo.toml [package] version '$cargoVersion'. Bump Cargo.toml's version and push a new commit before re-tagging, or delete/re-push the correct tag."
+            exit 1
+          }
+
+          Write-Host "OK: tag version matches Cargo.toml version ($cargoVersion)"
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -107,15 +139,17 @@ jobs:
             1. Download `rampp-${{ github.ref_name }}-windows-x64.exe` and place it at `C:\rampp\rampp.exe`
             2. Extract [Apache 2.4 (Win64, VS17)](https://www.apachelounge.com/download/) into `C:\rampp\apache\`
             3. Extract [MySQL 9.x (ZIP)](https://dev.mysql.com/downloads/mysql/) into `C:\rampp\mysql\`
-            4. Install [Visual C++ Redistributable 2022 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-            5. Run `rampp.exe` — first-launch provisioning is automatic
+            4. Extract [PHP 8.x Thread Safe (ZIP)](https://windows.php.net/download/) into `C:\rampp\php\` so `php-cgi.exe` ends up at `C:\rampp\php\php-cgi.exe`
+            5. Optional — extract [phpMyAdmin](https://www.phpmyadmin.net/downloads/) into `C:\rampp\phpmyadmin\` to enable the built-in admin toggle
+            6. Install [Visual C++ Redistributable 2022 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+            7. Run `rampp.exe` — first-launch provisioning is automatic
 
             Verify the download with the `.sha256` file:
             ```powershell
             Get-FileHash rampp-${{ github.ref_name }}-windows-x64.exe -Algorithm SHA256
             ```
 
-            See [README](https://github.com/${{ github.repository }}/blob/master/README.md) for full documentation.
+            See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for full documentation.
           files: |
             rampp-${{ github.ref_name }}-windows-x64.exe
             rampp-${{ github.ref_name }}-windows-x64.exe.sha256

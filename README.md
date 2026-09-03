@@ -31,7 +31,8 @@
 - **Safe** — every service runs inside a Windows Job Object; killing RAMPP kills the entire process tree, no zombies
 - **Observable** — all transitions logged; events are replayable for debugging
 - **Fast** — sub-second UI, Apache ready in ≤ 3 s, MySQL ready in ≤ 5 s
-- **Self-provisioning** — generates `httpd.conf`, `my.ini`, `php.ini`, and initialises the MySQL data directory on first run
+- **Self-provisioning** — generates `httpd.conf`, `my.ini`, `php.ini`, `phpmyadmin.conf` and `config.inc.php`, and initialises the MySQL data directory on first run; marker-gated so hand-edited files are never clobbered
+- **phpMyAdmin integration** — optional one-click admin toggle, wired automatically to the running MySQL + PHP instances
 - **System tray** — lives quietly in the tray; full egui status window on demand
 - **Crash recovery** — automatic restart with exponential backoff (1 s → 2 s → 4 s → 8 s → Error)
 - **Quick access** — open localhost in the browser or jump straight to a service config file from each row
@@ -48,6 +49,7 @@
 | [Apache HTTP Server 2.4 (Win64, VS17)](https://www.apachelounge.com/download/) | From Apache Lounge |
 | [MySQL 9.x Community (ZIP)](https://dev.mysql.com/downloads/mysql/) | ZIP archive, not installer |
 | [PHP 8.x Thread Safe (ZIP)](https://windows.php.net/download/) | TS x64 ZIP — required for PHP-CGI FastCGI |
+| [phpMyAdmin (ZIP)](https://www.phpmyadmin.net/downloads/) | Optional — enables the built-in admin toggle |
 | [Visual C++ Redistributable 2022 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe) | Required by Apache Lounge builds |
 
 ---
@@ -82,6 +84,16 @@ Extract the PHP ZIP so that `php-cgi.exe` ends up at:
 C:\rampp\php\php-cgi.exe
 ```
 
+Optionally, extract [phpMyAdmin](https://www.phpmyadmin.net/downloads/) so that `index.php` ends up at:
+
+```
+C:\rampp\phpmyadmin\index.php
+```
+
+phpMyAdmin is not required for Apache, MySQL or PHP to run — it only unlocks the
+admin toggle in the status window (see [Configuration ownership](#configuration-ownership)
+below for the files RAMPP generates for it).
+
 The final layout should look like:
 
 ```
@@ -100,6 +112,9 @@ C:\rampp\
     php-cgi.exe
     ext\
     ...
+  phpmyadmin\        (optional)
+    index.php
+    ...
 ```
 
 ### 3. Install the Visual C++ Redistributable
@@ -111,11 +126,43 @@ Run `vc_redist.x64.exe` if you haven't already.
 Double-click `rampp.exe`. On first launch RAMPP will:
 
 1. Generate `rampp.toml` (ports 80 + 3306 + 9000)
-2. Create `apache\conf\httpd.conf`, `apache\htdocs\index.php`, `mysql\my.ini`, `php\php.ini`
-3. Run `mysqld --initialize-insecure` (~10–20 s, once only)
+2. Create `apache\conf\httpd.conf`, `apache\htdocs\index.php`, `mysql\my.ini`, `php\php.ini`, and (if `phpmyadmin\` exists) `apache\conf\phpmyadmin.conf` + `phpmyadmin\config.inc.php`
+3. Run `mysqld --initialize-insecure` (~10–20 s, once only), then create a `127.0.0.1` account so RAMPP's own TCP connections (health checks, phpMyAdmin) can authenticate — see the note below
 4. Show the system tray icon and status window
 
 Click **Start All** to bring up all three services. Apache will be at `http://127.0.0.1/`, MySQL at `127.0.0.1:3306` (root, no password), and PHP-CGI will be listening on `127.0.0.1:9000` (FastCGI, proxied from Apache).
+
+> **Why a second MySQL account?** `mysqld --initialize-insecure` only ever creates
+> `root@localhost`. RAMPP's own connections — health checks, phpMyAdmin, anything
+> in `rampp.toml`'s `[phpmyadmin]` section — are TCP to `127.0.0.1` (the
+> loopback-only security constraint), which is a distinct grant from `localhost`
+> and would otherwise be refused outright. First-run initialization also grants
+> `<mysql_user>@'127.0.0.1'` (default user `root`, empty password) full
+> privileges — but not `WITH GRANT OPTION` — so this works out of the box.
+
+### Configuration ownership
+
+RAMPP generates `httpd.conf`, `my.ini`, `php.ini`, `phpmyadmin.conf` and
+phpMyAdmin's `config.inc.php`, and each one carries a marker line on its first
+line identifying it as generated.
+
+- **Keep the marker** and RAMPP keeps the file in sync — ports, document root and
+  phpMyAdmin wiring all follow your settings automatically. Your previous content
+  is saved beside it as `.bak` whenever RAMPP changes it.
+- **Remove the marker** and the file becomes yours. RAMPP will never write it
+  again. If a port then needs to move because something else holds it, the
+  affected service reports an error naming the file instead of silently
+  misconfiguring itself.
+
+**Upgrading to 1.5.0:** before 1.5.0, `php.ini` and `my.ini` were never
+regenerated once created. If you edited either of them while leaving the marker
+line intact, your changes will be replaced on first run and saved to
+`php.ini.bak` / `my.ini.bak`. Remove the marker line first if you want RAMPP to
+leave the file alone permanently.
+
+**phpMyAdmin during a service crash:** phpMyAdmin now stays enabled if MySQL or
+PHP crashes. It returns 503 until auto-retry brings the service back, rather than
+switching itself off and requiring a manual re-toggle.
 
 ---
 
@@ -134,11 +181,21 @@ port = 3306
 
 [php]
 port = 9000
+
+[phpmyadmin]
+mysql_user = "root"
+mysql_password = ""
 ```
 
 RAMPP validates the entire file before accepting it — an invalid config is rejected completely and the last valid config is preserved. After editing, restart the affected service from the UI.
 
-> `httpd.conf`, `my.ini`, and `php.ini` are generated once and never overwritten — edit them freely for custom virtual hosts, extensions, etc.
+`[phpmyadmin]` sets the credentials RAMPP uses for its own MySQL connections —
+health checks and phpMyAdmin's `config.inc.php` — and the account that first-run
+initialization grants at `127.0.0.1`, described above. It does not need to match
+any account you create yourself for other tools.
+
+See [Configuration ownership](#configuration-ownership) above for which files
+RAMPP regenerates and which it leaves alone.
 
 ---
 
@@ -162,8 +219,10 @@ STATE + EVENT → NEW STATE + SIDE EFFECTS
 | Paths | `paths.rs` | Install-dir contract, traversal rejection, symlink rejection |
 | Log | `logger.rs` | Bounded ring buffer (1 000 lines) |
 | Apache conf | `apache_conf.rs` | Generate `httpd.conf` with PHP FastCGI proxy |
-| MySQL conf | `mysql_conf.rs` | Generate `my.ini`, initialize data dir |
+| MySQL conf | `mysql_conf.rs` | Generate `my.ini`, initialize data dir, grant the `127.0.0.1` account |
 | PHP conf | `php_conf.rs` | Generate `php.ini` for PHP-CGI |
+| phpMyAdmin conf | `phpmyadmin_conf.rs` | Generate `phpmyadmin.conf` and `config.inc.php` |
+| Provisioning | `provision.rs` | Marker-gated, diff-driven reconciler for every managed config file |
 | Tray | `tray.rs` | Windows system tray |
 | UI | `ui.rs` | egui status window |
 
@@ -233,7 +292,7 @@ cargo fmt -- --check
 - Environment variables are sanitised before spawning child processes
 - Config writes are atomic (`temp → fsync → rename`) — a crash during write cannot corrupt the config
 - Symlinks are rejected for the config directory, binaries, and data directory
-- MySQL is initialised with `--initialize-insecure` (no root password) — **suitable for local development only**
+- MySQL is initialised with `--initialize-insecure` (no root password); first run also grants `<mysql_user>@'127.0.0.1'` full privileges (no `WITH GRANT OPTION`) so RAMPP's own loopback connections authenticate — **suitable for local development only**
 
 ---
 
