@@ -161,8 +161,11 @@ line intact, your changes will be replaced on first run and saved to
 leave the file alone permanently.
 
 **phpMyAdmin during a service crash:** phpMyAdmin now stays enabled if MySQL or
-PHP crashes. It returns 503 until auto-retry brings the service back, rather than
-switching itself off and requiring a manual re-toggle.
+PHP crashes, rather than switching itself off and requiring a manual re-toggle.
+If PHP crashes, Apache's `mod_proxy_fcgi` can't reach the PHP-CGI backend and
+returns 503 until auto-retry restarts it; if MySQL crashes while Apache/PHP
+stay up, phpMyAdmin's own PHP code hits the failed connection instead, which
+surfaces as an in-page connection error, not an Apache-level 503.
 
 ---
 
