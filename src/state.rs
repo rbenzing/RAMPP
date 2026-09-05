@@ -136,6 +136,15 @@ struct PortSlot {
     /// Ports proven unbindable during the current start attempt. Cleared by
     /// `begin_attempt`. This is what bounds the allocation retry loop.
     unavailable: Vec<u16>,
+    /// Monotonic counter bumped by every `assign()` call for this service —
+    /// never reset by `begin_attempt`. Unlike `assigned` (a port number, which
+    /// can legitimately repeat across attempts, e.g. a crash/retry that scans
+    /// back to the same first candidate), this value is unique to each `assign`
+    /// call for the lifetime of this `PortState`, which is what makes it a safe
+    /// correlation token for readiness reports: a stale poller from an
+    /// abandoned attempt can never be mistaken for the current one, even when
+    /// both happen to be watching the same port number.
+    attempt: u32,
 }
 
 /// Reducer-owned port allocation ledger — the single source of truth for which
@@ -172,8 +181,22 @@ impl PortState {
         self.slot(svc).assigned
     }
 
+    /// The correlation token for the most recent `assign()` call for `svc`.
+    /// Readiness events (`ProcessReady`/`ReadinessTimeout`) carry the value that
+    /// was current at the moment their `StartReadinessCheck` was queued — this
+    /// is compared against it to decide whether a report belongs to the
+    /// in-flight attempt or an orphaned poller from one the reducer already
+    /// abandoned.
+    pub fn current_attempt(&self, svc: Service) -> u32 {
+        self.slot(svc).attempt
+    }
+
     pub fn assign(&mut self, svc: Service, port: u16) {
-        self.slot_mut(svc).assigned = Some(port);
+        let slot = self.slot_mut(svc);
+        slot.assigned = Some(port);
+        // wrapping_add: a u32 wrapping after 4 billion start attempts in one
+        // process lifetime is not a real concern, and it keeps this panic-free.
+        slot.attempt = slot.attempt.wrapping_add(1);
     }
 
     pub fn is_unavailable(&self, svc: Service, port: u16) -> bool {

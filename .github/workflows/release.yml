@@ -13,6 +13,19 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Restricts the default GITHUB_TOKEN to read-only for the whole workflow. The
+# release job below overrides this with its own `permissions: contents: write`,
+# which takes precedence for that job only — check needs no write access at all.
+permissions:
+  contents: read
+
+# A re-pushed tag or rapid repeated pushes to the same ref should cancel a
+# stale in-flight run for that ref rather than pile up, without touching
+# concurrent runs on other branches/PRs/tags.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ── Check: runs on every PR and tag ──────────────────────────────────────
   check:
@@ -44,6 +57,10 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy -- -D warnings
 
+      # Layer 3 (tests/system_stack.rs) never runs here: those tests are
+      # #[ignore]d and require RAMPP_L3_DIR pointing at a real provisioned
+      # Apache/MySQL/PHP stack plus `cargo test -- --ignored` to run. This
+      # step only exercises Layers 1 (pure reducer) and 2 (integration).
       - name: Run tests
         run: cargo test
 

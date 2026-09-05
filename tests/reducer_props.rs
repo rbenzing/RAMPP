@@ -84,6 +84,16 @@ fn arb_port() -> impl Strategy<Value = u16> {
     prop_oneof![8080u16..=8100, 3306u16..=3326, 9000u16..=9020]
 }
 
+/// A small, deliberately-collision-prone range — mirrors `arb_port()`'s
+/// calibration rationale. `PortState::current_attempt` starts most services
+/// at 1 or 2 real attempts deep during a short generated event sequence, so a
+/// tight range like this actually lands on the live value often enough to
+/// exercise the "matching, in-flight report" branch of the correlation guard,
+/// not just its "stale" branch — a huge sparse range would almost always miss.
+fn arb_attempt() -> impl Strategy<Value = u32> {
+    0u32..=3
+}
+
 fn arb_event() -> impl Strategy<Value = Event> {
     prop_oneof![
         arb_service().prop_map(Event::StartService),
@@ -95,10 +105,20 @@ fn arb_event() -> impl Strategy<Value = Event> {
                 exit_code: code,
             }
         }),
-        (arb_service(), arb_port())
-            .prop_map(|(svc, port)| Event::ProcessReady { service: svc, port }),
-        (arb_service(), arb_port())
-            .prop_map(|(svc, port)| Event::ReadinessTimeout { service: svc, port }),
+        (arb_service(), arb_port(), arb_attempt()).prop_map(|(svc, port, attempt)| {
+            Event::ProcessReady {
+                service: svc,
+                port,
+                attempt,
+            }
+        }),
+        (arb_service(), arb_port(), arb_attempt()).prop_map(|(svc, port, attempt)| {
+            Event::ReadinessTimeout {
+                service: svc,
+                port,
+                attempt,
+            }
+        }),
         (arb_service(), any::<String>()).prop_map(|(svc, reason)| {
             Event::ProcessSpawnFailed {
                 service: svc,

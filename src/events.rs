@@ -17,20 +17,30 @@ pub enum Event {
         exit_code: Option<u32>,
     },
     /// The readiness poller confirmed the service answering on `port`.
+    ///
+    /// `attempt` is the correlation token captured from `PortState::assign` at
+    /// the moment the poller was queued (`SideEffect::StartReadinessCheck`) —
+    /// the reducer accepts this report only if it still matches
+    /// `state.ports.current_attempt(service)`. `port` alone is not a safe
+    /// correlation key: a later attempt can validly reallocate back to the
+    /// exact same port an old, still-running orphaned poller was watching.
     ProcessReady {
         service: Service,
         port: u16,
+        attempt: u32,
     },
     /// The readiness poller gave up waiting for `port` to answer within the
     /// service's readiness timeout. Distinct from `ProcessExit`: the OS process
     /// may still be alive (see `poll_until_ready_with_timeout`), so this is only
-    /// authoritative for the start attempt currently in flight on that exact
-    /// port — a stale report (e.g. from an attempt the reducer already moved
-    /// past after a `PortUnavailable` reallocation) must be dropped, not treated
-    /// as a crash of whatever is running now.
+    /// authoritative for the start attempt currently in flight — correlated via
+    /// `attempt`, not `port` (see `ProcessReady`'s doc comment for why port
+    /// alone is unsafe) — a stale report (e.g. from an attempt the reducer
+    /// already moved past after a `PortUnavailable` reallocation) must be
+    /// dropped, not treated as a crash of whatever is running now.
     ReadinessTimeout {
         service: Service,
         port: u16,
+        attempt: u32,
     },
     ProcessSpawnFailed {
         service: Service,
@@ -107,10 +117,14 @@ pub enum SideEffect {
     /// The port to poll is fixed here, at the moment the reducer queues the
     /// effect — not re-derived later from possibly-stale `state.ports`, which
     /// could have moved on to a different attempt by the time the executor
-    /// gets around to running this.
+    /// gets around to running this. `attempt` is the correlation token from
+    /// `PortState::current_attempt` at that same moment — echoed back verbatim
+    /// on the `ProcessReady`/`ReadinessTimeout` this poller eventually sends,
+    /// so the reducer can tell it apart from a later, superseding attempt.
     StartReadinessCheck {
         service: Service,
         port: u16,
+        attempt: u32,
     },
     StopHealthCheck(Service),
     LogEvent(String),

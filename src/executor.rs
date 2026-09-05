@@ -50,10 +50,33 @@ impl Executor {
         for effect in effects {
             match effect {
                 SideEffect::SpawnService { service, port } => self.do_spawn(service, port, state),
-                SideEffect::KillService(svc) => self.do_kill(svc, state),
-                SideEffect::StartReadinessCheck { service, port } => {
-                    self.do_readiness_check(service, port)
+                SideEffect::KillService(svc) => {
+                    if !self.do_kill(svc, state) {
+                        // No live handle existed — the service never actually
+                        // finished spawning (port conflict, user-owned-config
+                        // block, reconcile failure, or spawn_service itself
+                        // failed). Nothing else will ever tell the reducer
+                        // this KillService is resolved, so synthesize the
+                        // ProcessExit a real one would have sent. Safe in
+                        // every state this can arrive in: it resolves
+                        // Stopping → Stopped exactly like a genuine exit
+                        // (the actual fix — see Finding B), and is a harmless
+                        // no-op everywhere else (e.g. Crashed, from
+                        // crash_and_retry's own KillService when that attempt
+                        // never spawned), identical to how a genuine
+                        // ProcessExit arriving in those states is already
+                        // handled.
+                        let _ = self.tx.send(Event::ProcessExit {
+                            service: svc,
+                            exit_code: None,
+                        });
+                    }
                 }
+                SideEffect::StartReadinessCheck {
+                    service,
+                    port,
+                    attempt,
+                } => self.do_readiness_check(service, port, attempt),
                 SideEffect::StopHealthCheck(svc) => self.do_stop_health(svc),
                 SideEffect::ScheduleRetry { service, delay } => {
                     self.do_schedule_retry(service, delay)
@@ -128,7 +151,12 @@ impl Executor {
             return;
         }
 
-        // Kill any existing handles for this service
+        // Kill any existing handles for this service. Return value intentionally
+        // ignored here: `false` (no prior handle) is the normal case for a
+        // service's very first spawn — unlike `execute`'s `KillService` arm,
+        // this call site must never synthesize a ProcessExit for it, since that
+        // would be caught by the Starting/Running crash arm and wrongly declare
+        // a crash immediately after a perfectly normal fresh spawn.
         self.do_kill(svc, state);
 
         let (kill_tx, kill_rx) = crossbeam_channel::bounded::<()>(1);
@@ -268,7 +296,16 @@ impl Executor {
         svc == Service::Mysql && self.handles.get(&svc).is_some_and(|h| h.became_ready)
     }
 
-    fn do_kill(&mut self, svc: Service, state: &AppState) {
+    /// Kills the live handle for `svc`, if one exists. Returns `true` when a
+    /// handle was found and processed, `false` when there was nothing to do —
+    /// which happens whenever a service never successfully finished spawning
+    /// (a port conflict, a user-owned-config-file block, a reconcile failure,
+    /// or `spawn_service` itself returning `Err` all leave no handle behind).
+    /// Callers that dispatch `KillService` expecting a real process teardown
+    /// (see `execute`'s `SideEffect::KillService` arm) use this to detect that
+    /// case and resolve it themselves — `do_kill` has no other way to tell
+    /// anyone.
+    fn do_kill(&mut self, svc: Service, state: &AppState) -> bool {
         self.do_stop_health(svc);
 
         // Ask MySQL to close InnoDB cleanly first. Best-effort only: the Job
@@ -327,16 +364,22 @@ impl Executor {
             if let Some(join) = h.watcher_join {
                 let _ = join.join();
             }
+            true
+        } else {
+            false
         }
     }
 
-    /// `port` is the exact port the reducer queued this check for — fixed at the
-    /// moment the `StartReadinessCheck` side effect was created, not re-derived
-    /// here from `state.ports`, which may have already moved on to a different
-    /// attempt by the time this side effect actually executes.
-    fn do_readiness_check(&self, svc: Service, port: u16) {
+    /// `port` and `attempt` are exactly what the reducer queued this check
+    /// for — fixed at the moment the `StartReadinessCheck` side effect was
+    /// created, not re-derived here from `state.ports`, which may have already
+    /// moved on to a different attempt by the time this side effect actually
+    /// executes. `attempt` is echoed back verbatim on the eventual
+    /// `ProcessReady`/`ReadinessTimeout` so the reducer can tell this poller
+    /// apart from one superseded by a later reallocation.
+    fn do_readiness_check(&self, svc: Service, port: u16, attempt: u32) {
         let tx = self.tx.clone();
-        std::thread::spawn(move || poll_until_ready(svc, port, tx));
+        std::thread::spawn(move || poll_until_ready(svc, port, attempt, tx));
     }
 
     fn do_stop_health(&mut self, svc: Service) {
@@ -760,5 +803,161 @@ mod tests {
 
         assert!(!executor.should_attempt_graceful_stop(Service::Apache));
         assert!(!executor.should_attempt_graceful_stop(Service::Php));
+    }
+
+    // ── Finding B: do_kill's return value and execute()'s handling of it ────
+    //
+    // A service that never actually spawned (a port conflict, a user-owned
+    // config block, a reconcile failure, or spawn_service itself returning
+    // Err all leave no handle behind) has nothing for do_kill to remove. If
+    // KillService is then dispatched for it — e.g. StopService arriving while
+    // Starting with no handle yet, or crash_and_retry's own KillService for an
+    // attempt that never spawned — do_kill used to silently no-op, and nothing
+    // ever told the reducer this was resolved: the service could get stuck in
+    // Stopping forever. do_kill now reports whether it found anything, and
+    // execute()'s KillService arm synthesizes the ProcessExit a real one would
+    // have sent whenever it did not.
+
+    #[test]
+    fn do_kill_returns_false_when_no_handle_exists() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let mut executor = Executor::new(cfg, tx, log);
+        let state = AppState::new(test_cfg(tmp.path()));
+
+        assert!(
+            !executor.do_kill(Service::Apache, &state),
+            "no handle was ever inserted for Apache — do_kill has nothing to do"
+        );
+    }
+
+    #[test]
+    fn do_kill_returns_true_when_a_handle_exists() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let mut executor = Executor::new(cfg, tx, log);
+        let state = AppState::new(test_cfg(tmp.path()));
+        executor.handles.insert(Service::Apache, fake_handle(false));
+
+        assert!(
+            executor.do_kill(Service::Apache, &state),
+            "a live (fake) handle existed and was processed"
+        );
+    }
+
+    /// The actual Finding B fix: `execute()`'s `KillService` arm must
+    /// synthesize `Event::ProcessExit{exit_code: None}` when `do_kill` reports
+    /// nothing was there to kill. This is what lets a service stuck in
+    /// Stopping with no handle (the reproduction above) actually resolve: the
+    /// synthetic event round-trips through the reducer's ordinary
+    /// `ProcessExit` handling exactly like a real exit would.
+    #[test]
+    fn execute_synthesizes_process_exit_when_kill_finds_no_handle() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let mut executor = Executor::new(cfg, tx, log);
+        let state = AppState::new(test_cfg(tmp.path()));
+
+        executor.execute(vec![SideEffect::KillService(Service::Apache)], &state);
+
+        let event = rx
+            .try_recv()
+            .expect("execute must synthesize a ProcessExit when do_kill found nothing to kill");
+        assert!(
+            matches!(
+                event,
+                Event::ProcessExit {
+                    service: Service::Apache,
+                    exit_code: None
+                }
+            ),
+            "expected a synthetic ProcessExit{{exit_code: None}}, got {event:?}"
+        );
+    }
+
+    /// Complementary case: when a live handle DOES exist, `execute()` must not
+    /// synthesize anything extra on top of the real teardown — only a genuine
+    /// exit (from the watcher, or the natural-exit path inside do_kill itself)
+    /// should ever produce the ProcessExit that resolves this KillService.
+    #[test]
+    fn execute_does_not_synthesize_process_exit_when_a_handle_existed() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let mut executor = Executor::new(cfg, tx, log);
+        let state = AppState::new(test_cfg(tmp.path()));
+        executor.handles.insert(Service::Apache, fake_handle(false));
+
+        executor.execute(vec![SideEffect::KillService(Service::Apache)], &state);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a live handle existed — execute must not synthesize a ProcessExit"
+        );
+    }
+
+    /// End-to-end walk of the extra scenario the fix must also cover, beyond
+    /// the generic "some service is stuck in Stopping" case above:
+    /// `ShutdownAll` arriving while a service is `Starting` with no handle at
+    /// all yet — e.g. `do_spawn` never got far enough to insert one (a port
+    /// conflict, a user-owned-config-file block, or a reconcile failure all
+    /// leave exactly this state). Before the fix this service would sit in
+    /// `Stopping` forever: the reducer's `ShutdownAll` handling emits
+    /// `KillService`, `do_kill` finds nothing and silently no-ops, and
+    /// nothing else ever tells the reducer this is resolved. Drives the real
+    /// reducer -> executor -> reducer round trip, exactly as the event loop
+    /// in `main.rs` would.
+    #[test]
+    fn shutdown_all_on_a_starting_service_with_no_handle_still_resolves_to_stopped() {
+        use crate::reducer::reducer;
+        use crate::state::ServiceState;
+
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let log = SharedLog::new();
+        let mut executor = Executor::new(cfg.clone(), tx, log);
+
+        let mut state = AppState::new(cfg);
+        state.set_starting(Service::Apache); // Starting, but do_spawn never got
+                                             // far enough to insert a handle.
+
+        let (state, effects) = reducer(state, Event::ShutdownAll);
+        assert_eq!(state.apache.state, ServiceState::Stopping);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::KillService(Service::Apache))));
+
+        // No handle was ever inserted for Apache — execute() must detect that
+        // via do_kill's false return and synthesize the ProcessExit that
+        // resolves it.
+        executor.execute(effects, &state);
+        let event = rx
+            .try_recv()
+            .expect("execute must synthesize ProcessExit for the handle-less Apache");
+        assert!(matches!(
+            event,
+            Event::ProcessExit {
+                service: Service::Apache,
+                exit_code: None
+            }
+        ));
+
+        // Feed the synthetic event back through the reducer, exactly as the
+        // real event loop would on its next cycle.
+        let (state, _) = reducer(state, event);
+        assert_eq!(
+            state.apache.state,
+            ServiceState::Stopped,
+            "the synthetic ProcessExit must resolve Stopping -> Stopped, unsticking \
+             a service that never actually spawned"
+        );
     }
 }

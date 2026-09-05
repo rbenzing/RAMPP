@@ -104,14 +104,22 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
         }
 
         // ── Process lifecycle ────────────────────────────────────────────────
-        Event::ProcessReady { service: svc, port } => {
+        Event::ProcessReady {
+            service: svc,
+            port,
+            attempt,
+        } => {
             // Only authoritative for the attempt currently in flight. A port-conflict
             // reallocation (PortUnavailable) leaves the ORIGINAL readiness poller
             // running with nothing to cancel it — if something else answers on that
             // original port, this guard is what stops that stale report from marking
-            // a process RAMPP never spawned as Running.
+            // a process RAMPP never spawned as Running. Correlated on `attempt`, not
+            // `port`: a later attempt can validly reallocate back to the exact same
+            // port an orphaned poller is still watching, so port equality alone is
+            // not a safe test — `attempt` only ever matches the most recent
+            // `PortState::assign` call for this service.
             let in_flight = state.service(svc).state == ServiceState::Starting
-                && state.ports.assigned(svc) == Some(port);
+                && state.ports.current_attempt(svc) == attempt;
             if !in_flight {
                 effects.push(SideEffect::LogEvent(format!(
                     "{svc}: ignoring stale ProcessReady for port {port}"
@@ -131,14 +139,20 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
             }
         }
 
-        Event::ReadinessTimeout { service: svc, port } => {
-            // Same correlation guard as PortUnavailable/ProcessReady above: only the
+        Event::ReadinessTimeout {
+            service: svc,
+            port,
+            attempt,
+        } => {
+            // Same attempt-based correlation as ProcessReady above: only the
             // in-flight attempt's own timeout may be treated as a crash. An orphaned
             // poller for a port the reducer already abandoned (after reallocating to
             // a new port following PortUnavailable) must never kill the healthy
-            // attempt that superseded it.
+            // attempt that superseded it — even if a later retry happens to
+            // reallocate back to the exact same port the orphaned poller is
+            // watching, which is why `port` alone can't be the correlation key.
             let in_flight = state.service(svc).state == ServiceState::Starting
-                && state.ports.assigned(svc) == Some(port);
+                && state.ports.current_attempt(svc) == attempt;
             if !in_flight {
                 effects.push(SideEffect::LogEvent(format!(
                     "{svc}: ignoring stale readiness timeout for port {port}"
@@ -283,6 +297,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                 match allocate_port(&state, svc) {
                     Some(next) => {
                         state.ports.assign(svc, next);
+                        let attempt = state.ports.current_attempt(svc);
                         effects.push(SideEffect::SpawnService {
                             service: svc,
                             port: next,
@@ -290,6 +305,7 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                         effects.push(SideEffect::StartReadinessCheck {
                             service: svc,
                             port: next,
+                            attempt,
                         });
                     }
                     None => {
@@ -551,6 +567,7 @@ fn begin_start(state: &mut AppState, svc: Service, effects: &mut Vec<SideEffect>
     match allocate_port(state, svc) {
         Some(port) => {
             state.ports.assign(svc, port);
+            let attempt = state.ports.current_attempt(svc);
             if port != configured_port(state, svc) {
                 effects.push(SideEffect::LogEvent(format!(
                     "{svc}: configured port {} in use — using {port} instead",
@@ -558,7 +575,11 @@ fn begin_start(state: &mut AppState, svc: Service, effects: &mut Vec<SideEffect>
                 )));
             }
             effects.push(SideEffect::SpawnService { service: svc, port });
-            effects.push(SideEffect::StartReadinessCheck { service: svc, port });
+            effects.push(SideEffect::StartReadinessCheck {
+                service: svc,
+                port,
+                attempt,
+            });
         }
         None => {
             state.service_mut(svc).state = ServiceState::Error;
@@ -678,11 +699,13 @@ mod tests {
         let mut state = make_state();
         set_state(&mut state, Service::Apache, ServiceState::Starting);
         state.ports.assign(Service::Apache, 80);
+        let attempt = state.ports.current_attempt(Service::Apache);
         let (new_state, _) = reducer(
             state,
             Event::ProcessReady {
                 service: Service::Apache,
                 port: 80,
+                attempt,
             },
         );
         assert_eq!(new_state.apache.state, ServiceState::Running);
@@ -812,6 +835,7 @@ mod tests {
             Event::ProcessReady {
                 service: Service::Apache,
                 port: 80,
+                attempt: 0,
             },
         );
         assert_eq!(new_state.apache.state, ServiceState::Running);
@@ -1233,11 +1257,13 @@ mod tests {
             "started_at must be set when Starting"
         );
         let port = state.ports.assigned(Service::Apache).unwrap();
+        let attempt = state.ports.current_attempt(Service::Apache);
         let (state, _) = reducer(
             state,
             Event::ProcessReady {
                 service: Service::Apache,
                 port,
+                attempt,
             },
         );
         assert!(
@@ -1257,11 +1283,13 @@ mod tests {
         );
         // Simulate ProcessReady — should move to Running without clearing started_at
         let port = state.ports.assigned(Service::Apache).unwrap();
+        let attempt = state.ports.current_attempt(Service::Apache);
         let (state, _) = reducer(
             state,
             Event::ProcessReady {
                 service: Service::Apache,
                 port,
+                attempt,
             },
         );
         assert!(
@@ -1342,11 +1370,13 @@ mod tests {
         state.open_phpmyadmin_on_apache_ready = true;
         state.apache.state = ServiceState::Starting;
         state.ports.assign(Service::Apache, 80);
+        let attempt = state.ports.current_attempt(Service::Apache);
         let (new_state, effects) = reducer(
             state,
             Event::ProcessReady {
                 service: Service::Apache,
                 port: 80,
+                attempt,
             },
         );
         assert!(effects
@@ -1361,11 +1391,13 @@ mod tests {
         state.open_phpmyadmin_on_apache_ready = false;
         state.apache.state = ServiceState::Starting;
         state.ports.assign(Service::Apache, 80);
+        let attempt = state.ports.current_attempt(Service::Apache);
         let (_, effects) = reducer(
             state,
             Event::ProcessReady {
                 service: Service::Apache,
                 port: 80,
+                attempt,
             },
         );
         assert!(!effects
@@ -1813,14 +1845,16 @@ mod tests {
         let mut state = make_state();
         state.config.apache.port = 8080;
         let (state, _) = reducer(state, Event::StartService(Service::Apache));
-        // Simulate the reducer having since reallocated to a new port (e.g. via
-        // PortUnavailable) — the ledger now holds a different assignment than the
-        // orphaned poller (still watching 8080) will ever report on.
+        // Simulate the reducer having since moved on to another attempt (e.g. via
+        // PortUnavailable) — the ledger's attempt counter has advanced past the
+        // one this orphaned poller (still watching port 9999 from a bygone
+        // attempt) will ever report on.
         let (state, effects) = reducer(
             state,
             Event::ReadinessTimeout {
                 service: Service::Apache,
                 port: 9999,
+                attempt: 999,
             },
         );
         assert!(
@@ -1844,11 +1878,13 @@ mod tests {
         state.apache.desired = DesiredServiceState::Running;
         let (state, _) = reducer(state, Event::StartService(Service::Apache));
         let port = state.ports.assigned(Service::Apache).unwrap();
+        let attempt = state.ports.current_attempt(Service::Apache);
         let (state, effects) = reducer(
             state,
             Event::ReadinessTimeout {
                 service: Service::Apache,
                 port,
+                attempt,
             },
         );
         assert_eq!(state.apache.state, ServiceState::Crashed);
@@ -1865,12 +1901,14 @@ mod tests {
         let mut state = make_state();
         state.config.apache.port = 8080;
         state.ports.assign(Service::Apache, 8080);
+        let attempt = state.ports.current_attempt(Service::Apache);
         set_state(&mut state, Service::Apache, ServiceState::Running);
         let (new_state, effects) = reducer(
             state,
             Event::ReadinessTimeout {
                 service: Service::Apache,
                 port: 8080,
+                attempt,
             },
         );
         assert_eq!(new_state.apache.state, ServiceState::Running);
@@ -1884,13 +1922,14 @@ mod tests {
         let mut state = make_state();
         state.config.apache.port = 8080;
         let (state, _) = reducer(state, Event::StartService(Service::Apache));
-        // The ledger holds 8080; a stale report claims readiness on a port that
-        // is not (or no longer) the in-flight assignment.
+        // The ledger's attempt counter has moved on; a stale report claims
+        // readiness for an attempt that is not (or no longer) in flight.
         let (state, effects) = reducer(
             state,
             Event::ProcessReady {
                 service: Service::Apache,
                 port: 9999,
+                attempt: 999,
             },
         );
         assert_eq!(
@@ -1918,12 +1957,14 @@ mod tests {
         state.config.apache.port = 8080;
         state.apache.desired = DesiredServiceState::Running;
 
-        // StartService queues SpawnService(8080) + StartReadinessCheck(8080).
+        // StartService queues SpawnService(8080) + StartReadinessCheck(8080, attempt 1).
         let (state, _) = reducer(state, Event::StartService(Service::Apache));
         assert_eq!(state.ports.assigned(Service::Apache), Some(8080));
+        let orphaned_attempt = state.ports.current_attempt(Service::Apache);
 
         // do_spawn finds 8080 occupied → PortUnavailable(8080). Reducer reallocates
-        // to 8081 and queues a SECOND poller — the first (on 8080) is now orphaned.
+        // to 8081 and queues a SECOND poller (attempt 2) — the first (attempt 1,
+        // on 8080) is now orphaned.
         let (state, effects) = reducer(
             state,
             Event::PortUnavailable {
@@ -1933,6 +1974,11 @@ mod tests {
         );
         assert_eq!(state.ports.assigned(Service::Apache), Some(8081));
         assert!(spawn_port(&effects) == Some(8081));
+        let current_attempt = state.ports.current_attempt(Service::Apache);
+        assert_ne!(
+            orphaned_attempt, current_attempt,
+            "reallocation must advance the attempt token"
+        );
 
         // The new attempt succeeds for real.
         let (state, _) = reducer(
@@ -1940,17 +1986,19 @@ mod tests {
             Event::ProcessReady {
                 service: Service::Apache,
                 port: 8081,
+                attempt: current_attempt,
             },
         );
         assert_eq!(state.apache.state, ServiceState::Running);
 
         // The orphaned poller for 8080 finally gives up and reports its timeout —
-        // stale, since the ledger has long since moved to 8081.
+        // stale, since the ledger's attempt counter has long since moved past it.
         let (state, effects) = reducer(
             state,
             Event::ReadinessTimeout {
                 service: Service::Apache,
                 port: 8080,
+                attempt: orphaned_attempt,
             },
         );
         assert_eq!(
@@ -1963,6 +2011,88 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, SideEffect::KillService(_))),
             "must not kill the healthy service on a stale readiness timeout"
+        );
+    }
+
+    /// Pins the exact 5-step reproduction from the follow-up review finding:
+    /// port-only correlation has a gap that attempt-based correlation closes.
+    /// `begin_attempt` clears the port blacklist on every fresh start, so a
+    /// crash + auto-retry can validly reallocate back to the EXACT SAME port
+    /// an old, still-running orphaned poller was watching — at which point a
+    /// port-only guard (`state.ports.assigned(svc) == Some(port)`) would
+    /// wrongly accept the stale report, because the port now matches again by
+    /// coincidence. Attempt-based correlation does not have this hole: the
+    /// orphaned poller's attempt token never matches again, no matter how many
+    /// times the port itself gets reused.
+    #[test]
+    fn stale_readiness_timeout_does_not_match_after_a_retry_reuses_the_same_port() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.apache.desired = DesiredServiceState::Running;
+
+        // 1. StartService → assigned 8080, poller #1 armed for (8080, attempt 1).
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8080));
+        let poller_1_attempt = state.ports.current_attempt(Service::Apache);
+
+        // 2. PortUnavailable{8080} → blacklist 8080, reallocate to 8081, poller #2
+        //    armed for (8081, attempt 2).
+        let (state, _) = reducer(
+            state,
+            Event::PortUnavailable {
+                service: Service::Apache,
+                port: 8080,
+            },
+        );
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8081));
+
+        // 3. ProcessExit{Some(1)} → crash, ScheduleRetry(1s).
+        let (state, effects) = reducer(
+            state,
+            Event::ProcessExit {
+                service: Service::Apache,
+                exit_code: Some(1),
+            },
+        );
+        assert_eq!(state.apache.state, ServiceState::Crashed);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::ScheduleRetry { .. })));
+
+        // 4. AutoRetry → begin_start → begin_attempt clears the blacklist →
+        //    allocate_port returns 8080 again (first in scan order) → assigned
+        //    8080, poller #3 armed for (8080, attempt 3) — same port as poller #1.
+        let (state, _) = reducer(state, Event::AutoRetry(Service::Apache));
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8080));
+        let poller_3_attempt = state.ports.current_attempt(Service::Apache);
+        assert_ne!(
+            poller_1_attempt, poller_3_attempt,
+            "attempt must have advanced even though the port (8080) repeats"
+        );
+
+        // 5. Poller #1's ReadinessTimeout{Apache, port: 8080} (from step 1, still
+        //    in flight) finally arrives. A port-only guard would wrongly accept
+        //    this — assigned(Apache) == Some(8080) is true again after step 4 —
+        //    and kill the healthy attempt #3. The attempt-based guard must reject
+        //    it: poller_1_attempt no longer equals current_attempt.
+        let (state, effects) = reducer(
+            state,
+            Event::ReadinessTimeout {
+                service: Service::Apache,
+                port: 8080,
+                attempt: poller_1_attempt,
+            },
+        );
+        assert_eq!(
+            state.apache.state,
+            ServiceState::Starting,
+            "attempt #3 must survive poller #1's stale timeout even though the port matches"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::KillService(_))),
+            "must not kill attempt #3 on poller #1's stale, port-colliding timeout"
         );
     }
 
@@ -1979,6 +2109,7 @@ mod tests {
         state.apache.desired = DesiredServiceState::Running;
 
         let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        let orphaned_attempt = state.ports.current_attempt(Service::Apache);
         let (state, _) = reducer(
             state,
             Event::PortUnavailable {
@@ -1990,13 +2121,15 @@ mod tests {
         // New attempt is still Starting — has not become ready yet.
         assert_eq!(state.apache.state, ServiceState::Starting);
 
-        // The orphaned poller for the abandoned port 8080 reports readiness —
-        // something else (not RAMPP's process) is listening there.
+        // The orphaned poller for the abandoned attempt reports readiness on its
+        // original port 8080 — something else (not RAMPP's process) is
+        // listening there.
         let (state, effects) = reducer(
             state,
             Event::ProcessReady {
                 service: Service::Apache,
                 port: 8080,
+                attempt: orphaned_attempt,
             },
         );
         assert_eq!(

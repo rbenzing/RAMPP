@@ -215,14 +215,14 @@ fn poll_until_ready_resolves_when_port_opens() {
         }
     });
 
-    poll_until_ready(Service::Php, port, tx);
+    poll_until_ready(Service::Php, port, 1, tx);
 
     let event = rx
         .recv_timeout(Duration::from_secs(3))
         .expect("should receive an event");
     assert!(
-        matches!(event, Event::ProcessReady { service: Service::Php, port: p } if p == port),
-        "expected ProcessReady{{service: Php, port: {port}}}, got {event:?}"
+        matches!(event, Event::ProcessReady { service: Service::Php, port: p, attempt: 1 } if p == port),
+        "expected ProcessReady{{service: Php, port: {port}, attempt: 1}}, got {event:?}"
     );
 }
 
@@ -241,7 +241,7 @@ fn poll_until_ready_times_out_and_sends_readiness_timeout() {
     let port = 59877u16;
     let timeout = Duration::from_millis(400);
 
-    poll_until_ready_with_timeout(Service::Php, port, tx, timeout);
+    poll_until_ready_with_timeout(Service::Php, port, 1, tx, timeout);
 
     let event = rx
         .recv_timeout(Duration::from_secs(2))
@@ -251,7 +251,8 @@ fn poll_until_ready_times_out_and_sends_readiness_timeout() {
             event,
             Event::ReadinessTimeout {
                 service: Service::Php,
-                port: p
+                port: p,
+                attempt: 1
             } if p == port
         ),
         "expected ReadinessTimeout on timeout, got {event:?}"
