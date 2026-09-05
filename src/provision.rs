@@ -112,9 +112,10 @@ pub fn desired_configs(
     out
 }
 
-/// On a genuinely fresh install (this launch just created `rampp.toml`), any
-/// pre-existing but unmarked `HttpdConf` can only be vendor-shipped stock
-/// content — e.g. Apache Lounge's own `httpd.conf`, which every new user's
+/// On a genuinely fresh install (nothing has ever provisioned it — main.rs uses
+/// `rampp.state`'s absence as that signal, not `rampp.toml`'s: see the comment
+/// there), any pre-existing but unmarked `HttpdConf` can only be vendor-shipped
+/// stock content — e.g. Apache Lounge's own `httpd.conf`, which every new user's
 /// installation steps have them extract to exactly this path — since nothing
 /// else has had a chance to run yet. Back it up next to itself with a
 /// `.vendor.bak` suffix (following the same naming convention `reconcile`
@@ -122,8 +123,10 @@ pub fn desired_configs(
 /// ordinary "genuinely absent" branch then writes RAMPP's own marked version
 /// through its normal, already-tested path. No writing logic is duplicated here.
 ///
-/// A no-op if the file does not exist (`reconcile` will just create it fresh)
-/// or already carries the RAMPP marker (nothing to adopt).
+/// A no-op if the file does not exist (`reconcile` will just create it fresh),
+/// already carries the RAMPP marker (nothing to adopt), or a `.vendor.bak` from
+/// a prior adoption already exists next to it (see the in-function comment —
+/// refuses rather than risks clobbering that backup).
 ///
 /// MUST NOT be called outside the fresh-install startup path. On every later
 /// launch an unmarked file might be the user's own deliberate replacement, and
@@ -144,10 +147,34 @@ pub fn adopt_vendor_httpd_conf(path: &std::path::Path) -> Result<(), String> {
             .map(|e| format!("{}.vendor.bak", e.to_string_lossy()))
             .unwrap_or_else(|| "vendor.bak".to_string()),
     );
+
+    // A backup already existing means a prior launch already adopted a vendor
+    // file at this path — this is only reachable at all on what main.rs believes
+    // is a fresh install, so in the ordinary case there should be nothing here
+    // yet. Refuse rather than guess: overwriting it would destroy the one copy
+    // of whatever vendor content that first adoption preserved, with no way to
+    // recover it. This is not a failure — the vendor file is simply left in
+    // place for the ordinary marker-gated `reconcile` path to pick up as
+    // `user_owned`, exactly as it would on any non-fresh launch.
+    if backup.exists() {
+        log::warn!(
+            "{} already exists — a vendor httpd.conf was already adopted here once; \
+             leaving {} untouched rather than risk overwriting that backup",
+            backup.display(),
+            path.display()
+        );
+        return Ok(());
+    }
+
     std::fs::write(&backup, content.as_bytes())
         .map_err(|e| format!("cannot back up vendor {}: {e}", path.display()))?;
     std::fs::remove_file(path)
         .map_err(|e| format!("cannot remove vendor {}: {e}", path.display()))?;
+    log::warn!(
+        "adopted vendor {} on fresh install — backed up to {} and removed so RAMPP can write its own generated version",
+        path.display(),
+        backup.display()
+    );
     Ok(())
 }
 
@@ -385,5 +412,33 @@ mod tests {
         );
         let backup = path.with_extension("conf.vendor.bak");
         assert_eq!(std::fs::read_to_string(backup).unwrap(), vendor);
+    }
+
+    #[test]
+    fn adopt_vendor_httpd_conf_refuses_to_clobber_an_existing_backup() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("httpd.conf");
+        let backup = path.with_extension("conf.vendor.bak");
+        let vendor = "# Apache Lounge httpd.conf (second occurrence)\nListen 80\n";
+        let existing_backup = "# Apache Lounge httpd.conf (already adopted once)\nListen 80\n";
+        std::fs::write(&path, vendor).unwrap();
+        std::fs::write(&backup, existing_backup).unwrap();
+
+        let result = adopt_vendor_httpd_conf(&path);
+
+        assert!(
+            result.is_ok(),
+            "an existing backup is a refusal, not a failure: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            vendor,
+            "the vendor file must be left completely untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            existing_backup,
+            "the pre-existing backup must not be overwritten"
+        );
     }
 }

@@ -44,14 +44,25 @@ fn main() {
 
     log::info!("RAMPP starting — install_dir: {}", install_dir.display());
 
-    // Ensure rampp.toml exists. `is_fresh_install` is true only when THIS call
-    // just created it — the one moment a pre-existing but unmarked httpd.conf
-    // can only be vendor-shipped stock content (e.g. Apache Lounge's own),
-    // since nothing else has had a chance to run yet. See step 4 below.
-    let is_fresh_install = match write_default_config(&install_dir) {
-        Ok(created) => created,
-        Err(e) => fatal(&format!("cannot write default config: {e}")),
-    };
+    // `rampp.state` (see step 3 below) is written unconditionally near the end of
+    // every successful launch — well after write_default_config/load_config/
+    // create_runtime_dirs have all run. Its absence is therefore a much more
+    // reliable "nothing has ever provisioned this install" signal than
+    // rampp.toml's absence: a user who deliberately took ownership of httpd.conf
+    // (removed the RAMPP marker — see README.md's documented workflow) and later
+    // deletes only rampp.toml (e.g. to reset ports) still has a surviving
+    // rampp.state, so they are correctly NOT treated as fresh. Computing this
+    // before any of the three steps below also means an abort partway through
+    // one of them never permanently burns the fresh-install signal — rampp.state
+    // genuinely still won't exist on the retried launch either. See step 4 below
+    // for where this gates `adopt_vendor_httpd_conf`.
+    let state_path = install_dir.join("rampp.state");
+    let is_fresh_install = !state_path.exists();
+
+    // Ensure rampp.toml exists (idempotent — never overwrites an existing file).
+    if let Err(e) = write_default_config(&install_dir) {
+        fatal(&format!("cannot write default config: {e}"));
+    }
 
     // Load and validate config
     let config = match load_config(&install_dir) {
@@ -98,7 +109,7 @@ fn main() {
     // file `reconcile` writes (my.ini, httpd.conf, php.ini, phpmyadmin.conf,
     // config.inc.php) — only on `rampp.state` and the `phpmyadmin/` directory's
     // mere existence — so it is safe here, before reconcile.
-    let persisted = config::read_persisted_state(&install_dir.join("rampp.state"));
+    let persisted = config::read_persisted_state(&state_path);
 
     let mut app_state = AppState::new(config.clone());
     app_state.apache.desired = persisted.apache_desired;
@@ -117,7 +128,7 @@ fn main() {
         persisted.phpmyadmin_blowfish_secret = Some(phpmyadmin_conf::generate_blowfish_secret());
     }
     persisted.phpmyadmin_enabled = app_state.phpmyadmin_enabled;
-    if let Err(e) = config::write_persisted_state(&install_dir.join("rampp.state"), &persisted) {
+    if let Err(e) = config::write_persisted_state(&state_path, &persisted) {
         log::error!("cannot persist state: {e}");
     }
 
@@ -126,15 +137,17 @@ fn main() {
     // no restarts can be needed and the report is only logged. This MUST run
     // before step 5 (MySQL initialization) — see the ordering note above.
     //
-    // On a genuinely fresh install, adopt a pre-existing but unmarked
-    // httpd.conf FIRST — before reconcile ever sees it. Apache Lounge's
-    // distribution (which README.md's own install steps have every new user
-    // extract to exactly this path) ships its own real httpd.conf, unmarked.
+    // When nothing has ever provisioned this install (rampp.state does not exist
+    // yet — see the definition of `is_fresh_install` above), adopt a pre-existing
+    // but unmarked httpd.conf FIRST — before reconcile ever sees it. Apache
+    // Lounge's distribution (which README.md's own install steps have every new
+    // user extract to exactly this path) ships its own real httpd.conf, unmarked.
     // Without this, reconcile would permanently classify it user-owned on the
     // very first launch and RAMPP would never write its own httpd.conf — no
     // configured port, no health endpoint, no PHP proxy — for the life of the
     // install. This must never run on a later launch: by then an unmarked file
-    // might be the user's own deliberate replacement, and the ordinary
+    // might be the user's own deliberate replacement (see README.md's documented
+    // "remove the marker and the file becomes yours" workflow), and the ordinary
     // marker-gated protection in `reconcile` must apply unchanged.
     if is_fresh_install {
         if let Err(e) = provision::adopt_vendor_httpd_conf(&config.apache.conf) {
@@ -157,22 +170,6 @@ fn main() {
     }
     for file in &report.user_owned {
         log::info!("{file} is user-owned — RAMPP will not modify it");
-    }
-
-    // A write failure for httpd.conf leaves Apache without RAMPP's port, health
-    // endpoint, or PHP proxy config — surface it in the UI immediately rather
-    // than letting the user discover it only once Apache fails to start (or,
-    // on a fresh install, only once the eventual crash loop from Finding 1's
-    // readiness timeout kicks in). Covers both a failed fresh-install adoption
-    // attempt above and a later launch where the file was replaced again.
-    if report.user_owned.contains(&ManagedFile::HttpdConf) {
-        let msg = format!(
-            "{} is user-owned (no RAMPP marker) — Apache will use its existing content as-is",
-            ManagedFile::HttpdConf
-        );
-        log::warn!("{msg}");
-        app_state.apache.last_error = Some(msg);
-        app_state.apache.state = ServiceState::Error;
     }
 
     // A my.ini write failure means MySQL has no `--defaults-file` to initialize

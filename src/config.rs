@@ -76,16 +76,10 @@ pub fn load_config(install_dir: &Path) -> Result<RampConfig, String> {
 }
 
 /// Write a default rampp.toml if none exists. Does not overwrite.
-///
-/// Returns `Ok(true)` when this call actually created the file — i.e. this is a
-/// genuinely fresh install, with nothing else having had a chance to run yet —
-/// and `Ok(false)` when `rampp.toml` already existed. Callers use this to gate
-/// one-time-only fresh-install behavior (see `provision::adopt_vendor_httpd_conf`)
-/// that must never run again on a later launch.
-pub fn write_default_config(install_dir: &Path) -> Result<bool, String> {
+pub fn write_default_config(install_dir: &Path) -> Result<(), String> {
     let paths = InstallPaths::from_install_dir(install_dir)?;
     if paths.config.exists() {
-        return Ok(false);
+        return Ok(());
     }
     let default = format!(
         r#"install_dir = "{}"
@@ -102,7 +96,7 @@ port = 9000
         install_dir.display().to_string().replace('\\', "\\\\")
     );
     atomic_write(&paths.config, default.as_bytes())?;
-    Ok(true)
+    Ok(())
 }
 
 /// Serialize the current config back to rampp.toml (atomic write). Preserves all
@@ -430,16 +424,16 @@ port = 9000
     }
 
     #[test]
-    fn write_default_config_reports_true_only_when_newly_created() {
+    fn write_default_config_is_idempotent_across_repeated_calls() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        assert!(
-            write_default_config(dir).unwrap(),
-            "must report true — this call actually created rampp.toml"
-        );
-        assert!(
-            !write_default_config(dir).unwrap(),
-            "must report false — rampp.toml already existed from the call above"
+        write_default_config(dir).unwrap();
+        let first = std::fs::read(dir.join("rampp.toml")).unwrap();
+        write_default_config(dir).unwrap();
+        let second = std::fs::read(dir.join("rampp.toml")).unwrap();
+        assert_eq!(
+            first, second,
+            "a second call must not alter the file created by the first"
         );
     }
 
