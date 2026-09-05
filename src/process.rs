@@ -174,7 +174,7 @@ pub fn spawn_service(
     effective_port: u16,
     _tx: Sender<Event>,
 ) -> Result<ServiceProcess, String> {
-    let (bin, args, work_dir) = service_params(svc, cfg, effective_port);
+    let (bin, args, work_dir) = service_params(svc, cfg, effective_port)?;
 
     validate_critical_path(&bin, &cfg.install_dir, false)
         .map_err(|e| format!("binary validation: {e}"))?;
@@ -305,7 +305,7 @@ fn service_params(
     svc: Service,
     cfg: &RampConfig,
     effective_port: u16,
-) -> (PathBuf, Vec<String>, PathBuf) {
+) -> Result<(PathBuf, Vec<String>, PathBuf), String> {
     match svc {
         Service::Apache => {
             // Apache's port is baked into httpd.conf; the caller is responsible for
@@ -317,7 +317,7 @@ fn service_params(
                 cfg.apache.conf.display().to_string(),
                 "-DFOREGROUND".into(),
             ];
-            (bin, args, work_dir)
+            Ok((bin, args, work_dir))
         }
         Service::Mysql => {
             // MySQL's port is baked into my.ini; the caller is responsible for
@@ -347,18 +347,24 @@ fn service_params(
             // effect. It is called out here so the correction is not lost.)
             let bin = cfg.mysql.bin.clone();
             let work_dir = cfg.install_dir.join("mysql");
-            let args = vec![format!(
-                "--defaults-file={}",
-                cfg.mysql.ini.to_string_lossy()
-            )];
-            (bin, args, work_dir)
+            // --init-file re-applies the RAMPP<->127.0.0.1 grant on every start, not
+            // just the very first --initialize-insecure run — see
+            // `mysql_conf::write_grant_bootstrap_file` for why an existing data
+            // directory can otherwise be permanently missing it and crash-loop on
+            // MySQL error 1130 forever.
+            let bootstrap_sql = crate::mysql_conf::write_grant_bootstrap_file(cfg)?;
+            let args = vec![
+                format!("--defaults-file={}", cfg.mysql.ini.to_string_lossy()),
+                format!("--init-file={}", bootstrap_sql.to_string_lossy()),
+            ];
+            Ok((bin, args, work_dir))
         }
         Service::Php => {
             let bin = cfg.php.bin.clone();
             let work_dir = cfg.install_dir.join("php");
             // PHP-CGI in FastCGI mode: bind to loopback on the resolved port.
             let args = vec!["-b".into(), format!("127.0.0.1:{effective_port}")];
-            (bin, args, work_dir)
+            Ok((bin, args, work_dir))
         }
     }
 }
@@ -420,6 +426,74 @@ pub fn diagnose_exit(svc: Service, log_tail: &str) -> ExitDiagnosis {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{ApacheConfig, MysqlConfig, PhpConfig, PhpMyAdminConfig};
+    use tempfile::TempDir;
+
+    fn test_cfg(dir: &std::path::Path) -> RampConfig {
+        RampConfig {
+            install_dir: dir.to_path_buf(),
+            apache: ApacheConfig {
+                port: 80,
+                bin: dir.join("apache").join("bin").join("httpd.exe"),
+                conf: dir.join("apache").join("conf").join("httpd.conf"),
+                document_root: dir.join("apache").join("htdocs"),
+            },
+            mysql: MysqlConfig {
+                port: 3306,
+                bin: dir.join("mysql").join("bin").join("mysqld.exe"),
+                data_dir: dir.join("mysql").join("data"),
+                ini: dir.join("mysql").join("my.ini"),
+            },
+            php: PhpConfig {
+                port: 9000,
+                bin: dir.join("php").join("php-cgi.exe"),
+                ini: dir.join("php").join("php.ini"),
+            },
+            phpmyadmin: PhpMyAdminConfig {
+                mysql_user: "root".to_string(),
+                mysql_password: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn mysql_start_args_always_include_the_grant_bootstrap_init_file() {
+        // The bootstrap file must self-heal an EXISTING data directory that
+        // predates this grant, not just a fresh --initialize-insecure run — so
+        // it has to be present on every normal start, not conditional on any
+        // "is this the first start" check.
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+        std::fs::create_dir_all(cfg.install_dir.join("mysql")).unwrap();
+
+        let (_, args, _) = service_params(Service::Mysql, &cfg, cfg.mysql.port).unwrap();
+
+        assert!(args.iter().any(|a| a.starts_with("--defaults-file=")));
+        let init_file_arg = args
+            .iter()
+            .find(|a| a.starts_with("--init-file="))
+            .expect("mysqld args must include --init-file for the grant bootstrap");
+        let bootstrap_path = init_file_arg.trim_start_matches("--init-file=");
+        assert!(
+            std::path::Path::new(bootstrap_path).exists(),
+            "the referenced bootstrap file must actually have been written"
+        );
+    }
+
+    #[test]
+    fn apache_and_php_start_args_never_reference_init_file() {
+        // --init-file is a MySQL-only concept; asserting its absence here
+        // guards against a future refactor accidentally sharing the arg
+        // between services.
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_cfg(tmp.path());
+
+        let (_, apache_args, _) = service_params(Service::Apache, &cfg, cfg.apache.port).unwrap();
+        let (_, php_args, _) = service_params(Service::Php, &cfg, cfg.php.port).unwrap();
+
+        assert!(!apache_args.iter().any(|a| a.contains("init-file")));
+        assert!(!php_args.iter().any(|a| a.contains("init-file")));
+    }
 
     #[test]
     fn apache_bind_failure_is_recognized() {
