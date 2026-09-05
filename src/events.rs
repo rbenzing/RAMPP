@@ -16,7 +16,22 @@ pub enum Event {
         service: Service,
         exit_code: Option<u32>,
     },
-    ProcessReady(Service),
+    /// The readiness poller confirmed the service answering on `port`.
+    ProcessReady {
+        service: Service,
+        port: u16,
+    },
+    /// The readiness poller gave up waiting for `port` to answer within the
+    /// service's readiness timeout. Distinct from `ProcessExit`: the OS process
+    /// may still be alive (see `poll_until_ready_with_timeout`), so this is only
+    /// authoritative for the start attempt currently in flight on that exact
+    /// port — a stale report (e.g. from an attempt the reducer already moved
+    /// past after a `PortUnavailable` reallocation) must be dropped, not treated
+    /// as a crash of whatever is running now.
+    ReadinessTimeout {
+        service: Service,
+        port: u16,
+    },
     ProcessSpawnFailed {
         service: Service,
         reason: String,
@@ -89,7 +104,14 @@ pub enum SideEffect {
         service: Service,
         delay: Duration,
     },
-    StartReadinessCheck(Service),
+    /// The port to poll is fixed here, at the moment the reducer queues the
+    /// effect — not re-derived later from possibly-stale `state.ports`, which
+    /// could have moved on to a different attempt by the time the executor
+    /// gets around to running this.
+    StartReadinessCheck {
+        service: Service,
+        port: u16,
+    },
     StopHealthCheck(Service),
     LogEvent(String),
     PersistDesiredState,

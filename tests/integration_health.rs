@@ -221,15 +221,19 @@ fn poll_until_ready_resolves_when_port_opens() {
         .recv_timeout(Duration::from_secs(3))
         .expect("should receive an event");
     assert!(
-        matches!(event, Event::ProcessReady(Service::Php)),
-        "expected ProcessReady(Php), got {event:?}"
+        matches!(event, Event::ProcessReady { service: Service::Php, port: p } if p == port),
+        "expected ProcessReady{{service: Php, port: {port}}}, got {event:?}"
     );
 }
 
-/// poll_until_ready sends ProcessExit when no service comes up within the timeout.
+/// poll_until_ready sends ReadinessTimeout — not ProcessExit — when no service
+/// comes up within the timeout. ProcessExit is reserved for the watcher thread's
+/// authoritative "the OS process actually exited" signal; a readiness poller has
+/// no way to know whether the process is still alive, so it gets its own event
+/// that the reducer only treats as a crash when it matches the in-flight port.
 /// Uses a short artificial timeout by checking a port that will never open.
 #[test]
-fn poll_until_ready_times_out_and_sends_process_exit() {
+fn poll_until_ready_times_out_and_sends_readiness_timeout() {
     use rampp::health::poll_until_ready_with_timeout;
 
     let (tx, rx) = unbounded();
@@ -245,12 +249,12 @@ fn poll_until_ready_times_out_and_sends_process_exit() {
     assert!(
         matches!(
             event,
-            Event::ProcessExit {
+            Event::ReadinessTimeout {
                 service: Service::Php,
-                exit_code: None
-            }
+                port: p
+            } if p == port
         ),
-        "expected ProcessExit on timeout, got {event:?}"
+        "expected ReadinessTimeout on timeout, got {event:?}"
     );
 }
 

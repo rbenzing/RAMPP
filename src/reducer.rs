@@ -104,8 +104,19 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
         }
 
         // ── Process lifecycle ────────────────────────────────────────────────
-        Event::ProcessReady(svc) => {
-            if state.service(svc).state == ServiceState::Starting {
+        Event::ProcessReady { service: svc, port } => {
+            // Only authoritative for the attempt currently in flight. A port-conflict
+            // reallocation (PortUnavailable) leaves the ORIGINAL readiness poller
+            // running with nothing to cancel it — if something else answers on that
+            // original port, this guard is what stops that stale report from marking
+            // a process RAMPP never spawned as Running.
+            let in_flight = state.service(svc).state == ServiceState::Starting
+                && state.ports.assigned(svc) == Some(port);
+            if !in_flight {
+                effects.push(SideEffect::LogEvent(format!(
+                    "{svc}: ignoring stale ProcessReady for port {port}"
+                )));
+            } else {
                 state.service_mut(svc).state = ServiceState::Running;
                 state.service_mut(svc).retry_count = 0;
                 state.service_mut(svc).health_fail_streak = 0;
@@ -117,11 +128,29 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     state.open_phpmyadmin_on_apache_ready = false;
                     effects.push(SideEffect::OpenPhpMyAdminBrowser);
                 }
-            } else {
+            }
+        }
+
+        Event::ReadinessTimeout { service: svc, port } => {
+            // Same correlation guard as PortUnavailable/ProcessReady above: only the
+            // in-flight attempt's own timeout may be treated as a crash. An orphaned
+            // poller for a port the reducer already abandoned (after reallocating to
+            // a new port following PortUnavailable) must never kill the healthy
+            // attempt that superseded it.
+            let in_flight = state.service(svc).state == ServiceState::Starting
+                && state.ports.assigned(svc) == Some(port);
+            if !in_flight {
                 effects.push(SideEffect::LogEvent(format!(
-                    "{svc}: ProcessReady ignored in state {}",
-                    state.service(svc).state
+                    "{svc}: ignoring stale readiness timeout for port {port}"
                 )));
+            } else {
+                crash_and_retry(
+                    &mut state,
+                    svc,
+                    &mut effects,
+                    format!("readiness timeout on port {port}"),
+                    format!("{svc}: crashed (readiness timeout on port {port})"),
+                );
             }
         }
 
@@ -149,45 +178,17 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                     }
                 }
                 ServiceState::Starting | ServiceState::Running => {
-                    // Unexpected exit → Crashed.
-                    // Note: ProcessExit can also be synthesised by the readiness poller
-                    // when readiness times out — in that case the OS process may still
-                    // be alive. Emit KillService to guarantee cleanup before any retry.
-                    state.service_mut(svc).state = ServiceState::Crashed;
-                    state.clear_started_at(svc);
-                    state.service_mut(svc).last_error =
-                        Some(format!("exited unexpectedly (code {exit_code:?})"));
-                    effects.push(SideEffect::StopHealthCheck(svc));
-                    effects.push(SideEffect::KillService(svc));
-                    effects.push(SideEffect::LogEvent(format!(
-                        "{svc}: crashed (exit {exit_code:?})"
-                    )));
-                    // Auto-retry if desired is Running and retries remain
-                    if state.service(svc).desired == DesiredServiceState::Running {
-                        let retry = state.service(svc).retry_count;
-                        if let Some(delay) = retry_delay(retry) {
-                            state.service_mut(svc).retry_count += 1;
-                            effects.push(SideEffect::ScheduleRetry {
-                                service: svc,
-                                delay,
-                            });
-                            effects.push(SideEffect::LogEvent(format!(
-                                "{svc}: retry {} of {} in {:?}",
-                                retry + 1,
-                                MAX_RETRIES,
-                                delay
-                            )));
-                        } else {
-                            state.service_mut(svc).state = ServiceState::Error;
-                            state.clear_started_at(svc);
-                            state.service_mut(svc).last_error =
-                                Some("max retries exceeded".to_string());
-                            state.ports.release(svc);
-                            effects.push(SideEffect::LogEvent(format!(
-                                "{svc}: max retries exceeded → Error"
-                            )));
-                        }
-                    }
+                    // Unexpected exit → Crashed. This is the watcher's authoritative
+                    // "the OS process actually exited" signal — always real, regardless
+                    // of which port it was on — unlike ReadinessTimeout above, which can
+                    // be synthesised by an orphaned poller while the real process lives.
+                    crash_and_retry(
+                        &mut state,
+                        svc,
+                        &mut effects,
+                        format!("exited unexpectedly (code {exit_code:?})"),
+                        format!("{svc}: crashed (exit {exit_code:?})"),
+                    );
                 }
                 other => {
                     effects.push(SideEffect::LogEvent(format!(
@@ -286,7 +287,10 @@ pub fn reducer(mut state: AppState, event: Event) -> (AppState, Vec<SideEffect>)
                             service: svc,
                             port: next,
                         });
-                        effects.push(SideEffect::StartReadinessCheck(svc));
+                        effects.push(SideEffect::StartReadinessCheck {
+                            service: svc,
+                            port: next,
+                        });
                     }
                     None => {
                         state.service_mut(svc).state = ServiceState::Error;
@@ -554,7 +558,7 @@ fn begin_start(state: &mut AppState, svc: Service, effects: &mut Vec<SideEffect>
                 )));
             }
             effects.push(SideEffect::SpawnService { service: svc, port });
-            effects.push(SideEffect::StartReadinessCheck(svc));
+            effects.push(SideEffect::StartReadinessCheck { service: svc, port });
         }
         None => {
             state.service_mut(svc).state = ServiceState::Error;
@@ -562,6 +566,51 @@ fn begin_start(state: &mut AppState, svc: Service, effects: &mut Vec<SideEffect>
             state.service_mut(svc).last_error = Some("no free port within scan range".to_string());
             effects.push(SideEffect::LogEvent(format!(
                 "{svc}: no free port within scan range → Error"
+            )));
+        }
+    }
+}
+
+/// Shared "unexpected exit" handling used by both a genuine `ProcessExit` while
+/// Starting/Running and an in-flight `ReadinessTimeout`. Transitions to Crashed,
+/// stops health checks, kills the process, and either schedules a retry or moves
+/// to Error once retries are exhausted — exactly the sequence both callers used
+/// to duplicate inline.
+fn crash_and_retry(
+    state: &mut AppState,
+    svc: Service,
+    effects: &mut Vec<SideEffect>,
+    last_error: String,
+    crashed_log: String,
+) {
+    state.service_mut(svc).state = ServiceState::Crashed;
+    state.clear_started_at(svc);
+    state.service_mut(svc).last_error = Some(last_error);
+    effects.push(SideEffect::StopHealthCheck(svc));
+    effects.push(SideEffect::KillService(svc));
+    effects.push(SideEffect::LogEvent(crashed_log));
+    // Auto-retry if desired is Running and retries remain
+    if state.service(svc).desired == DesiredServiceState::Running {
+        let retry = state.service(svc).retry_count;
+        if let Some(delay) = retry_delay(retry) {
+            state.service_mut(svc).retry_count += 1;
+            effects.push(SideEffect::ScheduleRetry {
+                service: svc,
+                delay,
+            });
+            effects.push(SideEffect::LogEvent(format!(
+                "{svc}: retry {} of {} in {:?}",
+                retry + 1,
+                MAX_RETRIES,
+                delay
+            )));
+        } else {
+            state.service_mut(svc).state = ServiceState::Error;
+            state.clear_started_at(svc);
+            state.service_mut(svc).last_error = Some("max retries exceeded".to_string());
+            state.ports.release(svc);
+            effects.push(SideEffect::LogEvent(format!(
+                "{svc}: max retries exceeded → Error"
             )));
         }
     }
@@ -628,7 +677,14 @@ mod tests {
     fn starting_process_ready_transitions_to_running() {
         let mut state = make_state();
         set_state(&mut state, Service::Apache, ServiceState::Starting);
-        let (new_state, _) = reducer(state, Event::ProcessReady(Service::Apache));
+        state.ports.assign(Service::Apache, 80);
+        let (new_state, _) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port: 80,
+            },
+        );
         assert_eq!(new_state.apache.state, ServiceState::Running);
     }
 
@@ -751,7 +807,13 @@ mod tests {
     fn process_ready_ignored_when_not_starting() {
         let mut state = make_state();
         set_state(&mut state, Service::Apache, ServiceState::Running);
-        let (new_state, _) = reducer(state, Event::ProcessReady(Service::Apache));
+        let (new_state, _) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port: 80,
+            },
+        );
         assert_eq!(new_state.apache.state, ServiceState::Running);
     }
 
@@ -1170,7 +1232,14 @@ mod tests {
             state.apache.started_at.is_some(),
             "started_at must be set when Starting"
         );
-        let (state, _) = reducer(state, Event::ProcessReady(Service::Apache));
+        let port = state.ports.assigned(Service::Apache).unwrap();
+        let (state, _) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port,
+            },
+        );
         assert!(
             state.apache.started_at.is_some(),
             "started_at must survive transition to Running"
@@ -1187,7 +1256,14 @@ mod tests {
             "started_at must be set on Starting"
         );
         // Simulate ProcessReady — should move to Running without clearing started_at
-        let (state, _) = reducer(state, Event::ProcessReady(Service::Apache));
+        let port = state.ports.assigned(Service::Apache).unwrap();
+        let (state, _) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port,
+            },
+        );
         assert!(
             state.apache.started_at.is_some(),
             "started_at must survive Running transition"
@@ -1265,7 +1341,14 @@ mod tests {
         let mut state = make_state_all_running();
         state.open_phpmyadmin_on_apache_ready = true;
         state.apache.state = ServiceState::Starting;
-        let (new_state, effects) = reducer(state, Event::ProcessReady(Service::Apache));
+        state.ports.assign(Service::Apache, 80);
+        let (new_state, effects) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port: 80,
+            },
+        );
         assert!(effects
             .iter()
             .any(|e| matches!(e, SideEffect::OpenPhpMyAdminBrowser)));
@@ -1277,7 +1360,14 @@ mod tests {
         let mut state = make_state_all_running();
         state.open_phpmyadmin_on_apache_ready = false;
         state.apache.state = ServiceState::Starting;
-        let (_, effects) = reducer(state, Event::ProcessReady(Service::Apache));
+        state.ports.assign(Service::Apache, 80);
+        let (_, effects) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port: 80,
+            },
+        );
         assert!(!effects
             .iter()
             .any(|e| matches!(e, SideEffect::OpenPhpMyAdminBrowser)));
@@ -1709,6 +1799,214 @@ mod tests {
             ServiceState::Starting,
             "still starting — a blocked port is not a crash"
         );
+    }
+
+    // ── ProcessReady / ReadinessTimeout correlation (Finding 1) ────────────
+    //
+    // These pin the fix for the CRITICAL review finding: an orphaned readiness
+    // poller left running against a port the reducer has since abandoned (after
+    // a PortUnavailable reallocation) must never be able to affect the new,
+    // in-flight attempt on a different port.
+
+    #[test]
+    fn stale_readiness_timeout_for_a_different_port_is_ignored() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        // Simulate the reducer having since reallocated to a new port (e.g. via
+        // PortUnavailable) — the ledger now holds a different assignment than the
+        // orphaned poller (still watching 8080) will ever report on.
+        let (state, effects) = reducer(
+            state,
+            Event::ReadinessTimeout {
+                service: Service::Apache,
+                port: 9999,
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::KillService(_))),
+            "a stale readiness timeout must never kill the in-flight attempt"
+        );
+        assert_eq!(
+            state.apache.state,
+            ServiceState::Starting,
+            "state must be untouched by a stale readiness timeout"
+        );
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8080));
+    }
+
+    #[test]
+    fn readiness_timeout_for_the_in_flight_port_crashes_and_retries() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.apache.desired = DesiredServiceState::Running;
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        let port = state.ports.assigned(Service::Apache).unwrap();
+        let (state, effects) = reducer(
+            state,
+            Event::ReadinessTimeout {
+                service: Service::Apache,
+                port,
+            },
+        );
+        assert_eq!(state.apache.state, ServiceState::Crashed);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::KillService(Service::Apache))));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::ScheduleRetry { .. })));
+    }
+
+    #[test]
+    fn readiness_timeout_ignored_when_service_is_not_starting() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.ports.assign(Service::Apache, 8080);
+        set_state(&mut state, Service::Apache, ServiceState::Running);
+        let (new_state, effects) = reducer(
+            state,
+            Event::ReadinessTimeout {
+                service: Service::Apache,
+                port: 8080,
+            },
+        );
+        assert_eq!(new_state.apache.state, ServiceState::Running);
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::KillService(_))));
+    }
+
+    #[test]
+    fn stale_process_ready_for_a_different_port_is_ignored() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        // The ledger holds 8080; a stale report claims readiness on a port that
+        // is not (or no longer) the in-flight assignment.
+        let (state, effects) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port: 9999,
+            },
+        );
+        assert_eq!(
+            state.apache.state,
+            ServiceState::Starting,
+            "a stale ProcessReady must never mark the service Running"
+        );
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::OpenPhpMyAdminBrowser)));
+    }
+
+    /// Hand-walks the reviewer's first reproduced scenario end-to-end: the
+    /// configured port is occupied by something that never answers the
+    /// readiness probe. `begin_start` queues a poller for the occupied port;
+    /// `do_spawn` detects the occupation and fires `PortUnavailable`, which
+    /// reallocates and queues a second poller for the new port. The first
+    /// poller — nothing ever cancels it — eventually gives up and reports
+    /// `ReadinessTimeout` for the ORIGINAL port. Before the fix this was
+    /// synthesised as `ProcessExit{None}` and unconditionally killed the
+    /// healthy reallocated service. After the fix it must be dropped as stale.
+    #[test]
+    fn orphaned_poller_timeout_on_the_abandoned_port_does_not_kill_the_reallocated_service() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.apache.desired = DesiredServiceState::Running;
+
+        // StartService queues SpawnService(8080) + StartReadinessCheck(8080).
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8080));
+
+        // do_spawn finds 8080 occupied → PortUnavailable(8080). Reducer reallocates
+        // to 8081 and queues a SECOND poller — the first (on 8080) is now orphaned.
+        let (state, effects) = reducer(
+            state,
+            Event::PortUnavailable {
+                service: Service::Apache,
+                port: 8080,
+            },
+        );
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8081));
+        assert!(spawn_port(&effects) == Some(8081));
+
+        // The new attempt succeeds for real.
+        let (state, _) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port: 8081,
+            },
+        );
+        assert_eq!(state.apache.state, ServiceState::Running);
+
+        // The orphaned poller for 8080 finally gives up and reports its timeout —
+        // stale, since the ledger has long since moved to 8081.
+        let (state, effects) = reducer(
+            state,
+            Event::ReadinessTimeout {
+                service: Service::Apache,
+                port: 8080,
+            },
+        );
+        assert_eq!(
+            state.apache.state,
+            ServiceState::Running,
+            "the healthy, reallocated service must survive its predecessor's orphaned timeout"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::KillService(_))),
+            "must not kill the healthy service on a stale readiness timeout"
+        );
+    }
+
+    /// Hand-walks the reviewer's second reproduced scenario: something IS
+    /// listening on the original (occupied) port and satisfies the readiness
+    /// check. Before the fix the orphaned poller's `ProcessReady` for that port
+    /// was accepted unconditionally, falsely marking the service Running for a
+    /// process RAMPP never spawned. After the fix it must be dropped as stale
+    /// because the ledger has already moved on to the reallocated port.
+    #[test]
+    fn orphaned_poller_ready_report_on_the_abandoned_port_does_not_falsely_mark_running() {
+        let mut state = make_state();
+        state.config.apache.port = 8080;
+        state.apache.desired = DesiredServiceState::Running;
+
+        let (state, _) = reducer(state, Event::StartService(Service::Apache));
+        let (state, _) = reducer(
+            state,
+            Event::PortUnavailable {
+                service: Service::Apache,
+                port: 8080,
+            },
+        );
+        assert_eq!(state.ports.assigned(Service::Apache), Some(8081));
+        // New attempt is still Starting — has not become ready yet.
+        assert_eq!(state.apache.state, ServiceState::Starting);
+
+        // The orphaned poller for the abandoned port 8080 reports readiness —
+        // something else (not RAMPP's process) is listening there.
+        let (state, effects) = reducer(
+            state,
+            Event::ProcessReady {
+                service: Service::Apache,
+                port: 8080,
+            },
+        );
+        assert_eq!(
+            state.apache.state,
+            ServiceState::Starting,
+            "a stale ready-report for an abandoned port must not mark the service Running"
+        );
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::OpenPhpMyAdminBrowser)));
     }
 
     #[test]

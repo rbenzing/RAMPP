@@ -23,7 +23,8 @@ use executor::Executor;
 use logger::SharedLog;
 use reducer::reducer;
 use state::{
-    AppState, DesiredServiceState, Service, ServiceState, COMMAND_DEBOUNCE, SHUTDOWN_GRACE_PERIOD,
+    AppState, DesiredServiceState, ManagedFile, Service, ServiceState, COMMAND_DEBOUNCE,
+    SHUTDOWN_GRACE_PERIOD,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -43,10 +44,14 @@ fn main() {
 
     log::info!("RAMPP starting — install_dir: {}", install_dir.display());
 
-    // Ensure rampp.toml exists
-    if let Err(e) = write_default_config(&install_dir) {
-        fatal(&format!("cannot write default config: {e}"));
-    }
+    // Ensure rampp.toml exists. `is_fresh_install` is true only when THIS call
+    // just created it — the one moment a pre-existing but unmarked httpd.conf
+    // can only be vendor-shipped stock content (e.g. Apache Lounge's own),
+    // since nothing else has had a chance to run yet. See step 4 below.
+    let is_fresh_install = match write_default_config(&install_dir) {
+        Ok(created) => created,
+        Err(e) => fatal(&format!("cannot write default config: {e}")),
+    };
 
     // Load and validate config
     let config = match load_config(&install_dir) {
@@ -120,6 +125,22 @@ fn main() {
     // for the very first time on a fresh install. Nothing is running yet, so
     // no restarts can be needed and the report is only logged. This MUST run
     // before step 5 (MySQL initialization) — see the ordering note above.
+    //
+    // On a genuinely fresh install, adopt a pre-existing but unmarked
+    // httpd.conf FIRST — before reconcile ever sees it. Apache Lounge's
+    // distribution (which README.md's own install steps have every new user
+    // extract to exactly this path) ships its own real httpd.conf, unmarked.
+    // Without this, reconcile would permanently classify it user-owned on the
+    // very first launch and RAMPP would never write its own httpd.conf — no
+    // configured port, no health endpoint, no PHP proxy — for the life of the
+    // install. This must never run on a later launch: by then an unmarked file
+    // might be the user's own deliberate replacement, and the ordinary
+    // marker-gated protection in `reconcile` must apply unchanged.
+    if is_fresh_install {
+        if let Err(e) = provision::adopt_vendor_httpd_conf(&config.apache.conf) {
+            log::warn!("could not adopt vendor httpd.conf on fresh install: {e}");
+        }
+    }
     let secret = persisted
         .phpmyadmin_blowfish_secret
         .clone()
@@ -138,11 +159,44 @@ fn main() {
         log::info!("{file} is user-owned — RAMPP will not modify it");
     }
 
+    // A write failure for httpd.conf leaves Apache without RAMPP's port, health
+    // endpoint, or PHP proxy config — surface it in the UI immediately rather
+    // than letting the user discover it only once Apache fails to start (or,
+    // on a fresh install, only once the eventual crash loop from Finding 1's
+    // readiness timeout kicks in). Covers both a failed fresh-install adoption
+    // attempt above and a later launch where the file was replaced again.
+    if report.user_owned.contains(&ManagedFile::HttpdConf) {
+        let msg = format!(
+            "{} is user-owned (no RAMPP marker) — Apache will use its existing content as-is",
+            ManagedFile::HttpdConf
+        );
+        log::warn!("{msg}");
+        app_state.apache.last_error = Some(msg);
+        app_state.apache.state = ServiceState::Error;
+    }
+
+    // A my.ini write failure means MySQL has no `--defaults-file` to initialize
+    // against: `mysqld --initialize-insecure` against a missing/stale defaults
+    // file prints "Fatal error in defaults handling. Program aborted!" but
+    // still exits 0, so `initialize_mysql` would silently report success while
+    // the data directory stays empty (the same shape of bug the ordering fix
+    // above this block already closed once for pure ordering — this closes it
+    // for the write-failure path too). Skip initialization entirely and
+    // surface the failure directly instead.
+    let my_ini_write_error: Option<String> = report
+        .errors
+        .iter()
+        .find(|(file, _)| *file == ManagedFile::MyIni)
+        .map(|(_, err)| err.clone());
+
     // 5. MySQL data directory initialization — deferred: if mysqld binary is
     // missing we record the error and let the UI surface it rather than
     // crashing silently. Runs after step 4 so `--defaults-file` always points
     // at a `my.ini` that actually exists, even on the very first launch.
-    let mysql_init_error: Option<String> = if mysql_conf::needs_initialization(&config) {
+    let mysql_init_error: Option<String> = if my_ini_write_error.is_some() {
+        log::error!("my.ini could not be written — skipping MySQL initialization");
+        None
+    } else if mysql_conf::needs_initialization(&config) {
         log::info!("MySQL data directory is empty — running --initialize-insecure");
         match mysql_conf::initialize_mysql(&config) {
             Ok(()) => None,
@@ -156,7 +210,11 @@ fn main() {
     };
 
     // 6. Surface deferred provisioning errors into the UI
-    if let Some(e) = mysql_init_error {
+    if let Some(e) = my_ini_write_error {
+        app_state.mysql.state = ServiceState::Error;
+        app_state.mysql.last_error = Some(format!("cannot write my.ini: {e}"));
+        app_state.mysql.desired = DesiredServiceState::Stopped;
+    } else if let Some(e) = mysql_init_error {
         app_state.mysql.state = ServiceState::Error;
         app_state.mysql.last_error = Some(format!("Init failed: {e}"));
         app_state.mysql.desired = DesiredServiceState::Stopped;

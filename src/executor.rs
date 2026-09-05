@@ -51,7 +51,9 @@ impl Executor {
             match effect {
                 SideEffect::SpawnService { service, port } => self.do_spawn(service, port, state),
                 SideEffect::KillService(svc) => self.do_kill(svc, state),
-                SideEffect::StartReadinessCheck(svc) => self.do_readiness_check(svc, state),
+                SideEffect::StartReadinessCheck { service, port } => {
+                    self.do_readiness_check(service, port)
+                }
                 SideEffect::StopHealthCheck(svc) => self.do_stop_health(svc),
                 SideEffect::ScheduleRetry { service, delay } => {
                     self.do_schedule_retry(service, delay)
@@ -328,8 +330,11 @@ impl Executor {
         }
     }
 
-    fn do_readiness_check(&self, svc: Service, state: &AppState) {
-        let port = state.ports.assigned(svc).unwrap_or_else(|| self.port(svc));
+    /// `port` is the exact port the reducer queued this check for — fixed at the
+    /// moment the `StartReadinessCheck` side effect was created, not re-derived
+    /// here from `state.ports`, which may have already moved on to a different
+    /// attempt by the time this side effect actually executes.
+    fn do_readiness_check(&self, svc: Service, port: u16) {
         let tx = self.tx.clone();
         std::thread::spawn(move || poll_until_ready(svc, port, tx));
     }

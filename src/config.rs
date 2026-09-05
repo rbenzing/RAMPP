@@ -76,10 +76,16 @@ pub fn load_config(install_dir: &Path) -> Result<RampConfig, String> {
 }
 
 /// Write a default rampp.toml if none exists. Does not overwrite.
-pub fn write_default_config(install_dir: &Path) -> Result<(), String> {
+///
+/// Returns `Ok(true)` when this call actually created the file — i.e. this is a
+/// genuinely fresh install, with nothing else having had a chance to run yet —
+/// and `Ok(false)` when `rampp.toml` already existed. Callers use this to gate
+/// one-time-only fresh-install behavior (see `provision::adopt_vendor_httpd_conf`)
+/// that must never run again on a later launch.
+pub fn write_default_config(install_dir: &Path) -> Result<bool, String> {
     let paths = InstallPaths::from_install_dir(install_dir)?;
     if paths.config.exists() {
-        return Ok(());
+        return Ok(false);
     }
     let default = format!(
         r#"install_dir = "{}"
@@ -95,7 +101,8 @@ port = 9000
 "#,
         install_dir.display().to_string().replace('\\', "\\\\")
     );
-    atomic_write(&paths.config, default.as_bytes())
+    atomic_write(&paths.config, default.as_bytes())?;
+    Ok(true)
 }
 
 /// Serialize the current config back to rampp.toml (atomic write). Preserves all
@@ -420,6 +427,20 @@ port = 9000
         std::fs::write(dir.join("rampp.toml"), b"original").unwrap();
         write_default_config(dir).unwrap();
         assert_eq!(std::fs::read(dir.join("rampp.toml")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn write_default_config_reports_true_only_when_newly_created() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        assert!(
+            write_default_config(dir).unwrap(),
+            "must report true — this call actually created rampp.toml"
+        );
+        assert!(
+            !write_default_config(dir).unwrap(),
+            "must report false — rampp.toml already existed from the call above"
+        );
     }
 
     #[test]

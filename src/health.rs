@@ -158,7 +158,13 @@ pub fn check_php_ready(port: u16) -> bool {
 }
 
 /// Poll for service readiness up to the spec-defined timeout.
-/// Emits ProcessReady on success or ProcessExit{exit_code: None} on timeout.
+/// Emits ProcessReady{port} on success or ReadinessTimeout{port} on timeout —
+/// never ProcessExit, which is reserved for the watcher thread's authoritative
+/// "the OS process actually exited" signal. The reducer correlates both events
+/// against the port it currently has assigned, so a report for a port it has
+/// since abandoned (e.g. after a PortUnavailable reallocation left this poller
+/// orphaned with nothing to cancel it) is dropped as stale rather than treated
+/// as a crash of — or a false-positive readiness for — whatever is running now.
 pub fn poll_until_ready(svc: Service, port: u16, tx: Sender<Event>) {
     let timeout = match svc {
         Service::Apache => APACHE_READY_TIMEOUT,
@@ -186,17 +192,16 @@ pub fn poll_until_ready_with_timeout(
             Service::Php => check_php_ready(port),
         };
         if ready {
-            let _ = tx.send(Event::ProcessReady(svc));
+            let _ = tx.send(Event::ProcessReady { service: svc, port });
             return;
         }
         std::thread::sleep(poll_interval);
     }
 
-    // Timed out — treat as process exit so the reducer handles it
-    let _ = tx.send(Event::ProcessExit {
-        service: svc,
-        exit_code: None,
-    });
+    // Timed out. Distinct from ProcessExit: the OS process may still be alive
+    // (this poller has no way to know either way) — the reducer decides whether
+    // this is real based on whether `port` is still the in-flight assignment.
+    let _ = tx.send(Event::ReadinessTimeout { service: svc, port });
 }
 
 /// Runs health checks on a TICK interval. Returns when stopped (channel dropped).

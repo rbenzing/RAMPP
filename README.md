@@ -125,12 +125,12 @@ Run `vc_redist.x64.exe` if you haven't already.
 
 Double-click `rampp.exe`. On first launch RAMPP will:
 
-1. Generate `rampp.toml` (ports 80 + 3306 + 9000)
+1. Generate `rampp.toml` (ports 8080 + 3306 + 9000)
 2. Create `apache\conf\httpd.conf`, `apache\htdocs\index.php`, `mysql\my.ini`, `php\php.ini`, and (if `phpmyadmin\` exists) `apache\conf\phpmyadmin.conf` + `phpmyadmin\config.inc.php`
 3. Run `mysqld --initialize-insecure` (~10–20 s, once only), then create a `127.0.0.1` account so RAMPP's own TCP connections (health checks, phpMyAdmin) can authenticate — see the note below
 4. Show the system tray icon and status window
 
-Click **Start All** to bring up all three services. Apache will be at `http://127.0.0.1/`, MySQL at `127.0.0.1:3306` (root, no password), and PHP-CGI will be listening on `127.0.0.1:9000` (FastCGI, proxied from Apache).
+Click **Start All** to bring up all three services. Apache will be at `http://127.0.0.1:8080/`, MySQL at `127.0.0.1:3306` (root, no password), and PHP-CGI will be listening on `127.0.0.1:9000` (FastCGI, proxied from Apache).
 
 > **Why a second MySQL account?** `mysqld --initialize-insecure` only ever creates
 > `root@localhost`. RAMPP's own connections — health checks, phpMyAdmin, anything
@@ -174,10 +174,10 @@ surfaces as an in-page connection error, not an Apache-level 503.
 Edit `C:\rampp\rampp.toml` to change ports:
 
 ```toml
-install_dir = "C:\\ramppp"
+install_dir = "C:\\rampp"
 
 [apache]
-port = 80
+port = 8080
 
 [mysql]
 port = 3306
@@ -213,7 +213,7 @@ STATE + EVENT → NEW STATE + SIDE EFFECTS
 | Layer | File | Role |
 |---|---|---|
 | Types | `state.rs` | `AppState`, `ServiceState` machine, all constants |
-| Events | `events.rs` | `Event` enum (13 variants) + `SideEffect` enum |
+| Events | `events.rs` | `Event` enum + `SideEffect` enum |
 | Logic | `reducer.rs` | Pure function — no I/O, fully unit-tested |
 | I/O | `executor.rs` | Translates `SideEffect`s into process ops and threads |
 | Processes | `process.rs` | Windows Job Object spawn/kill |

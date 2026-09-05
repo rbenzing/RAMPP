@@ -112,6 +112,45 @@ pub fn desired_configs(
     out
 }
 
+/// On a genuinely fresh install (this launch just created `rampp.toml`), any
+/// pre-existing but unmarked `HttpdConf` can only be vendor-shipped stock
+/// content — e.g. Apache Lounge's own `httpd.conf`, which every new user's
+/// installation steps have them extract to exactly this path — since nothing
+/// else has had a chance to run yet. Back it up next to itself with a
+/// `.vendor.bak` suffix (following the same naming convention `reconcile`
+/// already uses for its own hand-edit backups) and remove it, so `reconcile`'s
+/// ordinary "genuinely absent" branch then writes RAMPP's own marked version
+/// through its normal, already-tested path. No writing logic is duplicated here.
+///
+/// A no-op if the file does not exist (`reconcile` will just create it fresh)
+/// or already carries the RAMPP marker (nothing to adopt).
+///
+/// MUST NOT be called outside the fresh-install startup path. On every later
+/// launch an unmarked file might be the user's own deliberate replacement, and
+/// the ordinary marker-gated protection in `reconcile` must apply unchanged —
+/// this function bypasses that protection by design, which is only safe at the
+/// single moment nothing but a vendor ZIP extraction could have written it.
+pub fn adopt_vendor_httpd_conf(path: &std::path::Path) -> Result<(), String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    if is_rampp_owned(ManagedFile::HttpdConf, &content) {
+        return Ok(());
+    }
+    let backup = path.with_extension(
+        path.extension()
+            .map(|e| format!("{}.vendor.bak", e.to_string_lossy()))
+            .unwrap_or_else(|| "vendor.bak".to_string()),
+    );
+    std::fs::write(&backup, content.as_bytes())
+        .map_err(|e| format!("cannot back up vendor {}: {e}", path.display()))?;
+    std::fs::remove_file(path)
+        .map_err(|e| format!("cannot remove vendor {}: {e}", path.display()))?;
+    Ok(())
+}
+
 /// Bring every managed file in line with its desired content.
 ///
 /// Idempotent by construction: a file is written only when its content actually
@@ -298,5 +337,53 @@ mod tests {
             "[mysqld]\nport = 3306\n"
         ));
         assert!(!is_rampp_owned(ManagedFile::PhpIni, "[PHP]\n"));
+    }
+
+    // ── adopt_vendor_httpd_conf (Finding 2) ────────────────────────────────
+
+    #[test]
+    fn adopt_vendor_httpd_conf_is_a_noop_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("httpd.conf");
+        assert!(adopt_vendor_httpd_conf(&path).is_ok());
+        assert!(!path.exists(), "must not create the file itself");
+    }
+
+    #[test]
+    fn adopt_vendor_httpd_conf_leaves_an_already_marked_file_alone() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("httpd.conf");
+        let marked = format!(
+            "{}\nListen 127.0.0.1:8080\n",
+            marker(ManagedFile::HttpdConf)
+        );
+        std::fs::write(&path, &marked).unwrap();
+
+        adopt_vendor_httpd_conf(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            marked,
+            "an already-owned file must not be touched"
+        );
+        let backup = path.with_extension("conf.vendor.bak");
+        assert!(!backup.exists(), "nothing to adopt — no backup expected");
+    }
+
+    #[test]
+    fn adopt_vendor_httpd_conf_backs_up_and_removes_an_unmarked_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("httpd.conf");
+        let vendor = "# Apache Lounge httpd.conf\nServerRoot \"C:/rampp/apache\"\nListen 80\n";
+        std::fs::write(&path, vendor).unwrap();
+
+        adopt_vendor_httpd_conf(&path).unwrap();
+
+        assert!(
+            !path.exists(),
+            "the vendor file must be cleared so reconcile sees it as genuinely absent"
+        );
+        let backup = path.with_extension("conf.vendor.bak");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), vendor);
     }
 }

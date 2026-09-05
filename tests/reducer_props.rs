@@ -95,7 +95,10 @@ fn arb_event() -> impl Strategy<Value = Event> {
                 exit_code: code,
             }
         }),
-        arb_service().prop_map(Event::ProcessReady),
+        (arb_service(), arb_port())
+            .prop_map(|(svc, port)| Event::ProcessReady { service: svc, port }),
+        (arb_service(), arb_port())
+            .prop_map(|(svc, port)| Event::ReadinessTimeout { service: svc, port }),
         (arb_service(), any::<String>()).prop_map(|(svc, reason)| {
             Event::ProcessSpawnFailed {
                 service: svc,
