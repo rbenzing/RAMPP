@@ -24,7 +24,12 @@ permissions:
 # concurrent runs on other branches/PRs/tags.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A tag push (the release job) must never be cancelled mid-flight by a
+  # re-push of the same tag — that could abort softprops/action-gh-release
+  # partway through creating the release or uploading assets, leaving a
+  # partial GitHub release behind. Branch/PR pushes (the check job) are safe
+  # to cancel-and-replace, which is the whole point of this block.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   # ── Check: runs on every PR and tag ──────────────────────────────────────

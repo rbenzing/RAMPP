@@ -915,7 +915,7 @@ mod tests {
     /// reducer -> executor -> reducer round trip, exactly as the event loop
     /// in `main.rs` would.
     #[test]
-    fn shutdown_all_on_a_starting_service_with_no_handle_still_resolves_to_stopped() {
+    fn stop_service_on_a_starting_service_with_no_handle_still_resolves_to_stopped() {
         use crate::reducer::reducer;
         use crate::state::ServiceState;
 
@@ -929,7 +929,12 @@ mod tests {
         state.set_starting(Service::Apache); // Starting, but do_spawn never got
                                              // far enough to insert a handle.
 
-        let (state, effects) = reducer(state, Event::ShutdownAll);
+        // StopService, not ShutdownAll: the real event loop (main.rs) breaks out
+        // of its receive loop immediately after executing a ShutdownAll, so that
+        // event's own synthetic follow-up would never actually be dequeued in
+        // production — it would only ever matter for a plain stop/restart, which
+        // this exercises instead.
+        let (state, effects) = reducer(state, Event::StopService(Service::Apache));
         assert_eq!(state.apache.state, ServiceState::Stopping);
         assert!(effects
             .iter()
